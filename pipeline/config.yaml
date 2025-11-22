@@ -1,17 +1,59 @@
-# 参考基因组（提前下载）
-ref_genome: "/data/ref/GRCh38.fa"
-germline_resource: "/data/ref/gnomad.vcf.gz"  # GATK推荐资源
-panel_of_normals: "/data/ref/pon.vcf.gz"      # GATK推荐
+# config.yaml - 新抗原分析流程配置文件
+# ===================== 样本信息 =====================
+# 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
+samples:
+  primary:  # 主样本组（可新增如metastasis: {tumor: meta1, normal: normal1}）
+    tumor: tumor  # 对应data/tumor_1.fastq.gz、data/tumor_2.fastq.gz
+    normal: normal  # 对应data/normal_1.fastq.gz、data/normal_2.fastq.gz
 
-# OptiType GPU配置 (optitype_config.ini)
-[behavior]
-use_gpu = true  # 无GPU时设为false
+# ===================== 线程配置 =====================
+# 按工具特性分配线程（根据服务器核心数调整）
+threads:
+  fastqc: 4          # FastQC质控线程
+  align: 16          # 比对/排序/去重线程
+  hla: 8             # HLA分型（Optitype）线程
+  mutect2: 8         # Mutect2每个区间线程
+  pvacseq: 32        # pVACseq新抗原预测线程
 
-[paths]
-razers3 = "razers3"
-core = "core"
+# ===================== 参考基因组与资源 =====================
+# 建议使用GRCh38（临床分析首选），需提前下载并构建索引
+ref_genome:
+  fa: "/path/to/reference/GRCh38_no_alt_analysis_set.fasta"  # 参考基因组FASTA
+  bwa_index: "/path/to/reference/GRCh38_no_alt_analysis_set.fasta"  # bwa-mem2索引前缀（与FASTA同路径即可）
 
-# 基因组分段（加速Mutect2）
+# Mutect2必需资源（germline/PON）
+germline_resource: "/path/to/resources/gnomAD.exomes.r2.1.1.sites.hg38.vcf.gz"  # gnomAD胚系突变库
+panel_of_normals: "/path/to/resources/Mutect2_PON.hg38.vcf.gz"  # 正常样本面板（PON）
+
+# ===================== 基因组区间配置 =====================
+# Mutect2 scatter-gather拆分区间（与generate_intervals规则输出对应）
+# 若使用generate_intervals自动生成，此处可留空；手动指定则填写区间名列表
 genome_intervals:
+  - genome_intervals/interval_1.interval_list
+  - genome_intervals/interval_2.interval_list
+  - genome_intervals/interval_3.interval_list
+  # （可通过ls genome_intervals/*.interval_list | sed 's/^/  - /' 自动生成）
 
+# ===================== 工具路径与参数 =====================
+# IEDB/NetMHCpan安装路径（pVACseq依赖）
+netmhc_dir: "/path/to/iedb"  # NetMHCpan等工具安装目录
 
+# Optitype HLA分型配置（GPU加速需确保配置文件路径正确）
+optitype:
+  config: "/path/to/optitype_config.ini"  # 含GPU加速配置的ini文件
+
+# pVACseq参数（可根据需求调整）
+pvacseq:
+  epitope_lengths: "8,9,10,11"  # 经典MHC I类表位长度
+  net_chop_method: "cterm"       # 剪切位点预测方法
+  netmhc_stab: true              # 是否启用NetMHCstab稳定性分析
+  pass_only: true               # 仅保留PASS突变
+
+# ===================== 输出路径（可选） =====================
+# 若需自定义输出路径，可在此配置（默认已在Snakefile中定义）
+output_dirs:
+  bam: "bam"
+  vcf: "vcf"
+  results: "results"
+  logs: "logs"
+  qc: "qc"

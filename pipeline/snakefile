@@ -1,11 +1,32 @@
-# Snakefile
 configfile: "config.yaml"
+
+# 全局参数校验
+import os
+assert os.path.exists(config["ref_genome"]), f"Ref genome {config['ref_genome']} not found!"
+assert os.path.exists(config["germline_resource"]), "Germline resource not found!"
+assert os.path.exists(config["panel_of_normals"]), "PON not found!"
 
 rule all:
     input:
-        "results/final.neoantigens.tsv"
+        "results/final.neoantigens.tsv",
+        "results/versions.tsv",
+        expand("qc/fastqc/{sample}_1_fastqc.html", sample=["tumor", "normal"])
 
-# 1. 比对 + 标记重复（肿瘤/正常样本并行）
+# 1. 质控：FastQC
+rule fastqc:
+    input: r1 = "data/{sample}_1.fastq.gz", r2 = "data/{sample}_2.fastq.gz"
+    output:
+        html1 = "qc/fastqc/{sample}_1_fastqc.html",
+        html2 = "qc/fastqc/{sample}_2_fastqc.html"
+    threads: config["threads"]["fastqc"]
+    log: "logs/fastqc/{sample}.log"
+    shell:
+        """
+        set -euo pipefail
+        fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
+        """
+
+# 2. 比对 + 标记重复
 rule align_and_dedup:
     input:
         r1 = "data/{sample}_1.fastq.gz",
@@ -13,50 +34,68 @@ rule align_and_dedup:
     output:
         bam = "bam/{sample}.sorted.dedup.bam",
         bai = "bam/{sample}.sorted.dedup.bam.bai"
-    threads: 16  # 每样本分配16线程
+    threads: config["threads"]["align"]
     params:
         ref = config["ref_genome"],
         tmp_dir = "tmp/{sample}"
+    log: "logs/align/{sample}.log"
     shell:
         """
+        set -euo pipefail
+        mkdir -p {params.tmp_dir}
         bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
         sambamba view -S -f bam /dev/stdin | \
-        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam} /dev/stdin
-        sambamba markdup -t {threads} --remove-duplicates {output.bam} {output.bam}
+        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam} --compression-level 6 /dev/stdin 2>&1 | tee {log}
+        sambamba markdup -t {threads} --remove-duplicates {output.bam} {output.bam}.tmp
+        mv {output.bam}.tmp {output.bam}
         sambamba index -t {threads} {output.bam}
+        rm -rf {params.tmp_dir}
         """
 
-# 2. HLA分型（仅肿瘤样本）
+# 3. 生成Mutect2区间
+rule generate_intervals:
+    output: "genome_intervals.list"
+    params: ref = config["ref_genome"]
+    log: "logs/generate_intervals.log"
+    shell:
+        """
+        set -euo pipefail
+        gatk SplitIntervals -R {params.ref} -O genome_intervals -L chr1-chr22,chrX,chrY --scatter-count 50 2>&1 | tee {log}
+        ls genome_intervals/*.interval_list > {output}
+        """
+
+# 4. HLA分型
 rule hla_typing:
     input:
-        r1 = "data/tumor_1.fastq.gz",
-        r2 = "data/tumor_2.fastq.gz"
-    output:
-        "results/hla/hla_results.tsv"
-    params:
-        config = "optitype_config.ini"  # 配置GPU加速
-    threads: 8
+        r1 = f"data/{config['samples']['tumor']}_1.fastq.gz",
+        r2 = f"data/{config['samples']['tumor']}_2.fastq.gz"
+    output: "results/hla/hla_results.tsv"
+    params: config = "optitype_config.ini"
+    threads: config["threads"]["hla"]
+    log: "logs/hla_typing.log"
     shell:
         """
+        set -euo pipefail
         optitype_pipeline.py -i {input.r1} {input.r2} -o results/hla/ \
-            --threads {threads} --config {params.config} --enumerate 2
+            --threads {threads} --config {params.config} --enumerate 2 2>&1 | tee {log}
         """
 
-# 3. 体细胞突变检测（Mutect2并行化）
+# 5. Mutect2 scatter
 rule mutect2_scatter:
     input:
-        tumor = "bam/tumor.sorted.dedup.bam",
-        normal = "bam/normal.sorted.dedup.bam",
+        tumor = "bam/{tumor}.sorted.dedup.bam".format(tumor=config["samples"]["tumor"]),
+        normal = "bam/{normal}.sorted.dedup.bam".format(normal=config["samples"]["normal"]),
         intervals = "genome_intervals.list"
-    output:
-        vcf = "vcf/mutect2/{interval}.vcf.gz"
+    output: "vcf/mutect2/{interval}.vcf.gz"
     params:
         ref = config["ref_genome"],
-        germline = config["germline_resource"],  # gnomAD
+        germline = config["germline_resource"],
         pon = config["panel_of_normals"]
-    threads: 8
+    threads: config["threads"]["mutect2"]
+    log: "logs/mutect2/{interval}.log"
     shell:
         """
+        set -euo pipefail
         gatk Mutect2 \
             -R {params.ref} \
             -I {input.tumor} -tumor tumor \
@@ -65,33 +104,51 @@ rule mutect2_scatter:
             --panel-of-normals {params.pon} \
             -L {wildcards.interval} \
             -O {output.vcf} \
-            --native-pair-hmm-threads {threads}
+            --native-pair-hmm-threads {threads} 2>&1 | tee {log}
         """
 
+# 6. Mutect2 gather
 rule mutect2_gather:
-    input:
-        expand("vcf/mutect2/{interval}.vcf.gz", interval=config["genome_intervals"])
-    output:
-        "vcf/somatic.vcf.gz"
+    input: expand("vcf/mutect2/{interval}.vcf.gz", interval=config["genome_intervals"])
+    output: "vcf/somatic.vcf.gz"
+    log: "logs/mutect2_gather.log"
     shell:
-        "gatk MergeVcfs -I {input} -O {output}"
+        """
+        set -euo pipefail
+        gatk MergeVcfs -I {input} -O {output} 2>&1 | tee {log}
+        """
 
-# 4. 新抗原预测（pVACseq整合）
+# 7. 新抗原预测
 rule pvacseq:
     input:
         vcf = "vcf/somatic.vcf.gz",
         hla = "results/hla/hla_results.tsv"
-    output:
-        "results/final.neoantigens.tsv"
+    output: "results/final.neoantigens.tsv"
     params:
-        sample_name = "tumor_sample",
+        sample_name = config["samples"]["tumor"],
         netmhc_dir = "$NETMHC_DIR",
-        epitope_lengths = "8,9,10,11"  # 常见长度
-    threads: 32  # 充分利用多核
+        epitope_lengths = "8,9,10,11"
+    threads: config["threads"]["pvacseq"]
+    log: "logs/pvacseq.log"
     shell:
         """
-        # 从HLA结果提取等位基因（示例）
-        HLA_ALLELES=$(grep -v '^#' {input.hla} | awk 'NR==2 {{print $2","$3","$4","$5","$6","$7}}')
+        set -euo pipefail
+        # 安全提取HLA等位基因
+        if [ ! -s {input.hla} ]; then
+            echo "ERROR: HLA typing result is empty!" && exit 1
+        fi
+        HLA_ALLELES=$(awk -F'\t' '
+            NR==2 {{
+                for(i=2;i<=7;i++) {{
+                    gsub(/\*/, "", $i);
+                    printf "%s,", $i
+                }}
+            }}
+        ' {input.hla} | sed 's/,$//')
+        
+        if [ -z "$HLA_ALLELES" ]; then
+            echo "ERROR: Failed to extract HLA alleles!" && exit 1
+        fi
         
         pvacseq run \
             {input.vcf} \
@@ -104,6 +161,24 @@ rule pvacseq:
             --n-threads {threads} \
             --net-chop-method cterm \
             --netmhc-stab \
-            --pass-only
-        cp results/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv {output}
+            --pass-only 2>&1 | tee {log}
+        
+        PVAC_OUTPUT="results/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
+        if [ ! -f "$PVAC_OUTPUT" ]; then
+            echo "ERROR: pVACseq output $PVAC_OUTPUT not found!" && exit 1
+        fi
+        cp "$PVAC_OUTPUT" {output}
+        """
+
+# 8. 版本记录
+rule check_versions:
+    output: "results/versions.tsv"
+    shell:
+        """
+        echo -e "tool\tversion" > {output}
+        echo -e "bwa-mem2\t$(bwa-mem2 version | head -1)" >> {output}
+        echo -e "sambamba\t$(sambamba --version | head -1)" >> {output}
+        echo -e "optitype\t$(optitype_pipeline.py --version | head -1)" >> {output}
+        echo -e "gatk\t$(gatk --version | grep "Version" | cut -d' ' -f2)" >> {output}
+        echo -e "pvacseq\t$(pvacseq --version | head -1)" >> {output}
         """
