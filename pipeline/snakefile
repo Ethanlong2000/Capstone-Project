@@ -1,0 +1,109 @@
+# Snakefile
+configfile: "config.yaml"
+
+rule all:
+    input:
+        "results/final.neoantigens.tsv"
+
+# 1. 比对 + 标记重复（肿瘤/正常样本并行）
+rule align_and_dedup:
+    input:
+        r1 = "data/{sample}_1.fastq.gz",
+        r2 = "data/{sample}_2.fastq.gz"
+    output:
+        bam = "bam/{sample}.sorted.dedup.bam",
+        bai = "bam/{sample}.sorted.dedup.bam.bai"
+    threads: 16  # 每样本分配16线程
+    params:
+        ref = config["ref_genome"],
+        tmp_dir = "tmp/{sample}"
+    shell:
+        """
+        bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
+        sambamba view -S -f bam /dev/stdin | \
+        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam} /dev/stdin
+        sambamba markdup -t {threads} --remove-duplicates {output.bam} {output.bam}
+        sambamba index -t {threads} {output.bam}
+        """
+
+# 2. HLA分型（仅肿瘤样本）
+rule hla_typing:
+    input:
+        r1 = "data/tumor_1.fastq.gz",
+        r2 = "data/tumor_2.fastq.gz"
+    output:
+        "results/hla/hla_results.tsv"
+    params:
+        config = "optitype_config.ini"  # 配置GPU加速
+    threads: 8
+    shell:
+        """
+        optitype_pipeline.py -i {input.r1} {input.r2} -o results/hla/ \
+            --threads {threads} --config {params.config} --enumerate 2
+        """
+
+# 3. 体细胞突变检测（Mutect2并行化）
+rule mutect2_scatter:
+    input:
+        tumor = "bam/tumor.sorted.dedup.bam",
+        normal = "bam/normal.sorted.dedup.bam",
+        intervals = "genome_intervals.list"
+    output:
+        vcf = "vcf/mutect2/{interval}.vcf.gz"
+    params:
+        ref = config["ref_genome"],
+        germline = config["germline_resource"],  # gnomAD
+        pon = config["panel_of_normals"]
+    threads: 8
+    shell:
+        """
+        gatk Mutect2 \
+            -R {params.ref} \
+            -I {input.tumor} -tumor tumor \
+            -I {input.normal} -normal normal \
+            --germline-resource {params.germline} \
+            --panel-of-normals {params.pon} \
+            -L {wildcards.interval} \
+            -O {output.vcf} \
+            --native-pair-hmm-threads {threads}
+        """
+
+rule mutect2_gather:
+    input:
+        expand("vcf/mutect2/{interval}.vcf.gz", interval=config["genome_intervals"])
+    output:
+        "vcf/somatic.vcf.gz"
+    shell:
+        "gatk MergeVcfs -I {input} -O {output}"
+
+# 4. 新抗原预测（pVACseq整合）
+rule pvacseq:
+    input:
+        vcf = "vcf/somatic.vcf.gz",
+        hla = "results/hla/hla_results.tsv"
+    output:
+        "results/final.neoantigens.tsv"
+    params:
+        sample_name = "tumor_sample",
+        netmhc_dir = "$NETMHC_DIR",
+        epitope_lengths = "8,9,10,11"  # 常见长度
+    threads: 32  # 充分利用多核
+    shell:
+        """
+        # 从HLA结果提取等位基因（示例）
+        HLA_ALLELES=$(grep -v '^#' {input.hla} | awk 'NR==2 {{print $2","$3","$4","$5","$6","$7}}')
+        
+        pvacseq run \
+            {input.vcf} \
+            {params.sample_name} \
+            "$HLA_ALLELES" \
+            NetMHCpan \
+            results/pvacseq/ \
+            -e {params.epitope_lengths} \
+            --iedb-install-directory {params.netmhc_dir} \
+            --n-threads {threads} \
+            --net-chop-method cterm \
+            --netmhc-stab \
+            --pass-only
+        cp results/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv {output}
+        """

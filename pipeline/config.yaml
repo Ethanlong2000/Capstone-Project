@@ -1,0 +1,17 @@
+# 参考基因组（提前下载）
+ref_genome: "/data/ref/GRCh38.fa"
+germline_resource: "/data/ref/gnomad.vcf.gz"  # GATK推荐资源
+panel_of_normals: "/data/ref/pon.vcf.gz"      # GATK推荐
+
+# OptiType GPU配置 (optitype_config.ini)
+[behavior]
+use_gpu = true  # 无GPU时设为false
+
+[paths]
+razers3 = "razers3"
+core = "core"
+
+# 基因组分段（加速Mutect2）
+genome_intervals:
+
+
