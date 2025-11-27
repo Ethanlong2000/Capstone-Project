@@ -18,29 +18,33 @@ threads:
 # ===================== 参考基因组与资源 =====================
 # 建议使用GRCh38（临床分析首选），需提前下载并构建索引
 ref_genome:
-  fa: "/path/to/reference/GRCh38_no_alt_analysis_set.fasta"  # 参考基因组FASTA
-  bwa_index: "/path/to/reference/GRCh38_no_alt_analysis_set.fasta"  # bwa-mem2索引前缀（与FASTA同路径即可）
+  fa: "/home/longyh/database/GRCh38.d1.vd1.fa"  # 参考基因组FASTA
+  bwa_index: "/home/longyh/database/GRCh38.d1.vd1.fa"  # bwa-mem2索引前缀（与FASTA同路径即可）
 
 # Mutect2必需资源（germline/PON）
-germline_resource: "/path/to/resources/gnomAD.exomes.r2.1.1.sites.hg38.vcf.gz"  # gnomAD胚系突变库
-panel_of_normals: "/path/to/resources/Mutect2_PON.hg38.vcf.gz"  # 正常样本面板（PON）
+germline_resource: "/home/longyh/database/gnomad.exomes.r2.1.1.sites.vcf.bgz"  # gnomAD胚系突变库
+panel_of_normals: "/home/longyh/database/1000g_pon.hg38.vcf.gz "  # 正常样本面板（PON）
 
 # ===================== 基因组区间配置 =====================
 # Mutect2 scatter-gather拆分区间（与generate_intervals规则输出对应）
 # 若使用generate_intervals自动生成，此处可留空；手动指定则填写区间名列表
 genome_intervals:
-  - genome_intervals/interval_1.interval_list
-  - genome_intervals/interval_2.interval_list
-  - genome_intervals/interval_3.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0000-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0001-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0002-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0003-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0004-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0005-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0006-scattered.interval_list
+  - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0007-scattered.interval_list
   # （可通过ls genome_intervals/*.interval_list | sed 's/^/  - /' 自动生成）
 
 # ===================== 工具路径与参数 =====================
 # IEDB/NetMHCpan安装路径（pVACseq依赖）
-netmhc_dir: "/path/to/iedb"  # NetMHCpan等工具安装目录
+netmhc_dir: "/home/longyh/bin/netMHCpan"  # NetMHCpan等工具安装目录
 
-# Optitype HLA分型配置（GPU加速需确保配置文件路径正确）
-optitype:
-  config: "/path/to/optitype_config.ini"  # 含GPU加速配置的ini文件
+
+ic50_cutoff: 500  # IC50阈值（nM），<500为高亲和力
 
 # pVACseq参数（可根据需求调整）
 pvacseq:

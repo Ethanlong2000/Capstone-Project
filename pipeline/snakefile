@@ -5,10 +5,13 @@ import os
 assert os.path.exists(config["ref_genome"]), f"Ref genome {config['ref_genome']} not found!"
 assert os.path.exists(config["germline_resource"]), "Germline resource not found!"
 assert os.path.exists(config["panel_of_normals"]), "PON not found!"
+assert "epitope_lengths" in config, "请在config.yaml中配置epitope_lengths（如8,9,10,11）"
+assert "netmhc_dir" in config, "请在config.yaml中配置netmhc_dir路径"
 
 rule all:
     input:
         "results/final.neoantigens.tsv",
+        "results/ic50_binding_affinity.tsv", 
         "results/versions.tsv",
         expand("qc/fastqc/{sample}_1_fastqc.html", sample=["tumor", "normal"])
 
@@ -65,19 +68,30 @@ rule generate_intervals:
         """
 
 # 4. HLA分型
+# 4. HLA分型 (使用本地 Docker 镜像)
 rule hla_typing:
     input:
         r1 = f"data/{config['samples']['tumor']}_1.fastq.gz",
-        r2 = f"data/{config['samples']['tumor']}_2.fastq.gz"
-    output: "results/hla/hla_results.tsv"
-    params: config = "optitype_config.ini"
+        r2 = f"data/{config['samples']['tumor']}_2.fastq.gz",
+        config_file = "config/optitype_config.ini"  # 显式作为输入，确保依赖追踪
+    output:
+        "results/hla/hla_results.tsv"
+    params:
+        outdir = "results/hla/"
     threads: config["threads"]["hla"]
     log: "logs/hla_typing.log"
+    container: "docker://optitype:latest"  # ← 关键！使用你加载的本地镜像
     shell:
         """
         set -euo pipefail
-        optitype_pipeline.py -i {input.r1} {input.r2} -o results/hla/ \
-            --threads {threads} --config {params.config} --enumerate 2 2>&1 | tee {log}
+        mkdir -p {params.outdir}
+        optitype_pipeline.py \
+            -i {input.r1} {input.r2} \
+            -o {params.outdir} \
+            --threads {threads} \
+            --config {input.config_file} \
+            --enumerate 2 \
+            2>&1 | tee {log}
         """
 
 # 5. Mutect2 scatter
@@ -181,4 +195,9 @@ rule check_versions:
         echo -e "optitype\t$(optitype_pipeline.py --version | head -1)" >> {output}
         echo -e "gatk\t$(gatk --version | grep "Version" | cut -d' ' -f2)" >> {output}
         echo -e "pvacseq\t$(pvacseq --version | head -1)" >> {output}
+        # 新增：NetMHCpan（IC50预测核心工具）版本
+        echo -e "netmhcpan\t$(netMHCpan -v | head -1 | awk '{{print $2}}')" >> {output}
+        # 新增：IEDB（IC50分析依赖）版本
+        echo -e "iedb\t$(python {params.netmhc_dir}/tools/iedb_allele_info.py --version 2>&1 | head -1)" >> {output}
         """
+
