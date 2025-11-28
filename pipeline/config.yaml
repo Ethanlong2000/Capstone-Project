@@ -2,9 +2,9 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  primary:  # 主样本组（可新增如metastasis: {tumor: meta1, normal: normal1}）
-    tumor: tumor  # 对应data/tumor_1.fastq.gz、data/tumor_2.fastq.gz
-    normal: normal  # 对应data/normal_1.fastq.gz、data/normal_2.fastq.gz
+  patient_001:  # 替换primary，更易区分多样本
+    tumor: tumor
+    normal: normal
 
 # ===================== 线程配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
@@ -17,13 +17,11 @@ threads:
 
 # ===================== 参考基因组与资源 =====================
 # 建议使用GRCh38（临床分析首选），需提前下载并构建索引
-ref_genome:
-  fa: "/home/longyh/database/GRCh38.d1.vd1.fa"  # 参考基因组FASTA
-  bwa_index: "/home/longyh/database/GRCh38.d1.vd1.fa"  # bwa-mem2索引前缀（与FASTA同路径即可）
+ref_genome: "/home/longyh/database/GRCh38.d1.vd1.fa"  # 参考基因组FASTA文件路径
 
 # Mutect2必需资源（germline/PON）
 germline_resource: "/home/longyh/database/gnomad.exomes.r2.1.1.sites.vcf.bgz"  # gnomAD胚系突变库
-panel_of_normals: "/home/longyh/database/1000g_pon.hg38.vcf.gz "  # 正常样本面板（PON）
+panel_of_normals: "/home/longyh/database/1000g_pon.hg38.vcf.gz"  # 正常样本面板（PON）
 
 # ===================== 基因组区间配置 =====================
 # Mutect2 scatter-gather拆分区间（与generate_intervals规则输出对应）
@@ -37,7 +35,8 @@ genome_intervals:
   - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0005-scattered.interval_list
   - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0006-scattered.interval_list
   - /home/longyh/database/TruSeq_Exome_v1.2_GRCh38_split/0007-scattered.interval_list
-  # （可通过ls genome_intervals/*.interval_list | sed 's/^/  - /' 自动生成）
+  # 手动指定的TruSeq Exome捕获区间列表（已删除generate_intervals规则，直接使用此列表）
+  # 生成方式：ls /database/TruSeq_Exome_v1.2_GRCh38_split/*.interval_list | sed 's/^/  - /'
 
 # ===================== 工具路径与参数 =====================
 # IEDB/NetMHCpan安装路径（pVACseq依赖）

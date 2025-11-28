@@ -174,7 +174,7 @@ rule pvacseq:
     params:
         sample_name = "{sample_group}",  # 样本组名作为pvacseq的样本名
         netmhc_dir = config["netmhc_dir"],
-        epitope_lengths = config["epitope_lengths"]
+        epitope_lengths: config["pvacseq"]["epitope_lengths"]  # 替换硬编码值
     threads: config["threads"]["pvacseq"]
     log: "logs/{sample_group}/pvacseq.log"
     shell:
