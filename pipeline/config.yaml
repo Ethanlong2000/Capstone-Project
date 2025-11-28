@@ -43,7 +43,6 @@ genome_intervals:
 # IEDB/NetMHCpan安装路径（pVACseq依赖）
 netmhc_dir: "/home/longyh/bin/netMHCpan"  # NetMHCpan等工具安装目录
 
-
 ic50_cutoff: 500  # IC50阈值（nM），<500为高亲和力
 
 # pVACseq参数（可根据需求调整）

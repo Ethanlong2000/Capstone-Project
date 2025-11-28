@@ -8,44 +8,57 @@ assert os.path.exists(config["panel_of_normals"]), "PON not found!"
 assert "epitope_lengths" in config, "请在config.yaml中配置epitope_lengths（如8,9,10,11）"
 assert "netmhc_dir" in config, "请在config.yaml中配置netmhc_dir路径"
 
+
+# 提取所有样本组名（从config中）
+SAMPLE_GROUPS = list(config["samples"].keys())
+
 rule all:
     input:
-        "results/final.neoantigens.tsv",
-        "results/ic50_binding_affinity.tsv", 
-        "results/versions.tsv",
-        expand("qc/fastqc/{sample}_1_fastqc.html", sample=["tumor", "normal"])
+        # 每个样本组的结果文件都带样本组名
+        expand("results/{sample_group}/final.neoantigens.tsv", sample_group=SAMPLE_GROUPS),
+        expand("results/{sample_group}/ic50_binding_affinity.tsv", sample_group=SAMPLE_GROUPS),
+        "results/versions.tsv",  # 版本文件全局唯一，无需样本维度
+        # 每个样本组的fastqc结果（tumor/normal都带样本组名）
+        expand("qc/fastqc/{sample_group}_{sample}_1_fastqc.html", 
+               sample_group=SAMPLE_GROUPS, sample=["tumor", "normal"])
 
 # 1. 质控：FastQC
 rule fastqc:
-    input: r1 = "data/{sample}_1.fastq.gz", r2 = "data/{sample}_2.fastq.gz"
+    input:
+        # 输入fastq路径：data/{样本组}_{tumor/normal}_1.fastq.gz（需对齐你的数据命名）
+        r1 = "data/{sample_group}_{sample}_1.fastq.gz",
+        r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        html1 = "qc/fastqc/{sample}_1_fastqc.html",
-        html2 = "qc/fastqc/{sample}_2_fastqc.html"
+        # 输出带样本组名，避免覆盖
+        html1 = "qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
+        html2 = "qc/fastqc/{sample_group}_{sample}_2_fastqc.html"
     threads: config["threads"]["fastqc"]
-    log: "logs/fastqc/{sample}.log"
+    log: "logs/{sample_group}/fastqc/{sample}.log"  # 日志也按样本组分
     shell:
         """
         set -euo pipefail
+        mkdir -p logs/{sample_group}/fastqc/  # 确保样本组日志目录存在
         fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
         """
 
 # 2. 比对 + 标记重复
 rule align_and_dedup:
     input:
-        r1 = "data/{sample}_1.fastq.gz",
-        r2 = "data/{sample}_2.fastq.gz"
+        r1 = "data/{sample_group}_{sample}_1.fastq.gz",
+        r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        bam = "bam/{sample}.sorted.dedup.bam",
-        bai = "bam/{sample}.sorted.dedup.bam.bai"
+        # BAM文件按样本组存放，避免多样本覆盖
+        bam = "bam/{sample_group}/{sample}.sorted.dedup.bam",
+        bai = "bam/{sample_group}/{sample}.sorted.dedup.bam.bai"
     threads: config["threads"]["align"]
     params:
         ref = config["ref_genome"],
-        tmp_dir = "tmp/{sample}"
-    log: "logs/align/{sample}.log"
+        tmp_dir = "tmp/{sample_group}/{sample}"
+    log: "logs/{sample_group}/align/{sample}.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p {params.tmp_dir}
+        mkdir -p {params.tmp_dir} logs/{sample_group}/align/ bam/{sample_group}/
         bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
         sambamba view -S -f bam /dev/stdin | \
         sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam} --compression-level 6 /dev/stdin 2>&1 | tee {log}
@@ -56,18 +69,17 @@ rule align_and_dedup:
         """
 
 # 3. 生成Mutect2区间
-rule generate_intervals:
-    output: "genome_intervals.list"
-    params: ref = config["ref_genome"]
-    log: "logs/generate_intervals.log"
-    shell:
-        """
-        set -euo pipefail
-        gatk SplitIntervals -R {params.ref} -O genome_intervals -L chr1-chr22,chrX,chrY --scatter-count 50 2>&1 | tee {log}
-        ls genome_intervals/*.interval_list > {output}
-        """
+# rule generate_intervals:
+#     output: "genome_intervals.list"
+#     params: ref = config["ref_genome"]
+#     log: "logs/generate_intervals.log"
+#     shell:
+#         """
+#         set -euo pipefail
+#         gatk SplitIntervals -R {params.ref} -O genome_intervals -L chr1-chr22,chrX,chrY --scatter-count 50 2>&1 | tee {log}
+#         ls genome_intervals/*.interval_list > {output}
+#         """
 
-# 4. HLA分型
 # 4. HLA分型 (使用本地 Docker 镜像)
 rule hla_typing:
     input:
@@ -80,7 +92,7 @@ rule hla_typing:
         outdir = "results/hla/"
     threads: config["threads"]["hla"]
     log: "logs/hla_typing.log"
-    container: "docker://optitype:latest"  # ← 关键！使用你加载的本地镜像
+    container: "docker://optitype:latest"  # 使用加载的本地镜像
     shell:
         """
         set -euo pipefail
@@ -97,60 +109,82 @@ rule hla_typing:
 # 5. Mutect2 scatter
 rule mutect2_scatter:
     input:
-        tumor = "bam/{tumor}.sorted.dedup.bam".format(tumor=config["samples"]["tumor"]),
-        normal = "bam/{normal}.sorted.dedup.bam".format(normal=config["samples"]["normal"]),
-        intervals = "genome_intervals.list"
-    output: "vcf/mutect2/{interval}.vcf.gz"
+        # 移除原有的intervals输入（genome_intervals.list）
+        tumor = "bam/{sample_group}/{tumor}.sorted.dedup.bam".format(tumor=config["samples"]["{sample_group}"]["tumor"]),
+        normal = "bam/{sample_group}/{normal}.sorted.dedup.bam".format(normal=config["samples"]["{sample_group}"]["normal"])
+    output:
+        # 通配符{interval}改为“区间文件名（不含路径/后缀）”，避免输出路径混乱
+        "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz"
     params:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
-        pon = config["panel_of_normals"]
+        pon = config["panel_of_normals"],
+        # 传递手动区间的完整路径（用于GATK -L参数）
+        interval_path = lambda wildcards: [i for i in config["genome_intervals"] if wildcards.interval_name in i][0]
     threads: config["threads"]["mutect2"]
-    log: "logs/mutect2/{interval}.log"
+    log: "logs/{sample_group}/mutect2/{interval_name}.log"
     shell:
         """
         set -euo pipefail
+        mkdir -p vcf/{sample_group}/mutect2/ logs/{sample_group}/mutect2/
+        # 直接使用手动指定的区间文件路径（params.interval_path）
         gatk Mutect2 \
             -R {params.ref} \
             -I {input.tumor} -tumor tumor \
             -I {input.normal} -normal normal \
             --germline-resource {params.germline} \
             --panel-of-normals {params.pon} \
-            -L {wildcards.interval} \
-            -O {output.vcf} \
+            -L {params.interval_path} \  # 核心：使用手动区间
+            -O {output} \
             --native-pair-hmm-threads {threads} 2>&1 | tee {log}
+        tabix -p vcf {output}
         """
 
 # 6. Mutect2 gather
+# 先定义一个函数：从手动区间路径中提取区间名（如0000-scattered）
+def get_interval_names(wildcards):
+    import os
+    # 遍历config中的手动区间路径，提取“文件名（不含后缀）”作为interval_name
+    return [os.path.splitext(os.path.basename(path))[0] for path in config["genome_intervals"]]
+
 rule mutect2_gather:
-    input: expand("vcf/mutect2/{interval}.vcf.gz", interval=config["genome_intervals"])
-    output: "vcf/somatic.vcf.gz"
-    log: "logs/mutect2_gather.log"
+    input:
+        # 按样本组+手动区间名匹配scatter输出
+        expand("vcf/{sample_group}/mutect2/{interval_name}.vcf.gz", 
+               sample_group=SAMPLE_GROUPS,  # 之前定义的样本组列表
+               interval_name=get_interval_names)
+    output:
+        "vcf/{sample_group}/somatic.vcf.gz"
+    log: "logs/{sample_group}/mutect2_gather.log"
     shell:
         """
         set -euo pipefail
+        mkdir -p vcf/{sample_group}/ logs/{sample_group}/
         gatk MergeVcfs -I {input} -O {output} 2>&1 | tee {log}
+        tabix -p vcf {output}
         """
 
 # 7. 新抗原预测
 rule pvacseq:
     input:
-        vcf = "vcf/somatic.vcf.gz",
-        hla = "results/hla/hla_results.tsv"
-    output: "results/final.neoantigens.tsv"
+        vcf = "vcf/{sample_group}/somatic.vcf.gz",
+        hla = "results/{sample_group}/hla/results.tsv"
+    output:
+        "results/{sample_group}/final.neoantigens.tsv"
     params:
-        sample_name = config["samples"]["tumor"],
-        netmhc_dir = "$NETMHC_DIR",
-        epitope_lengths = "8,9,10,11"
+        sample_name = "{sample_group}",  # 样本组名作为pvacseq的样本名
+        netmhc_dir = config["netmhc_dir"],
+        epitope_lengths = config["epitope_lengths"]
     threads: config["threads"]["pvacseq"]
-    log: "logs/pvacseq.log"
+    log: "logs/{sample_group}/pvacseq.log"
     shell:
         """
         set -euo pipefail
-        # 安全提取HLA等位基因
+        mkdir -p results/{sample_group}/ logs/{sample_group}/
         if [ ! -s {input.hla} ]; then
-            echo "ERROR: HLA typing result is empty!" && exit 1
+            echo "ERROR: HLA typing result {input.hla} is empty!" && exit 1
         fi
+        # 提取HLA等位基因
         HLA_ALLELES=$(awk -F'\t' '
             NR==2 {{
                 for(i=2;i<=7;i++) {{
@@ -159,32 +193,59 @@ rule pvacseq:
                 }}
             }}
         ' {input.hla} | sed 's/,$//')
-        
         if [ -z "$HLA_ALLELES" ]; then
-            echo "ERROR: Failed to extract HLA alleles!" && exit 1
+            echo "ERROR: Failed to extract HLA alleles for {sample_group}!" && exit 1
         fi
-        
+        # 运行pvacseq
         pvacseq run \
             {input.vcf} \
             {params.sample_name} \
             "$HLA_ALLELES" \
             NetMHCpan \
-            results/pvacseq/ \
+            results/{sample_group}/pvacseq/ \
             -e {params.epitope_lengths} \
             --iedb-install-directory {params.netmhc_dir} \
             --n-threads {threads} \
             --net-chop-method cterm \
             --netmhc-stab \
             --pass-only 2>&1 | tee {log}
-        
-        PVAC_OUTPUT="results/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
+        # 复制结果
+        PVAC_OUTPUT="results/{sample_group}/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
         if [ ! -f "$PVAC_OUTPUT" ]; then
-            echo "ERROR: pVACseq output $PVAC_OUTPUT not found!" && exit 1
+            echo "ERROR: pVACseq output $PVAC_OUTPUT not found for {sample_group}!" && exit 1
         fi
         cp "$PVAC_OUTPUT" {output}
         """
 
-# 8. 版本记录
+#8. IC50结合亲和力汇总
+rule extract_ic50:
+    input: "results/{sample_group}/final.neoantigens.tsv"
+    output: "results/{sample_group}/ic50_binding_affinity.tsv"
+    log: "logs/{sample_group}/extract_ic50.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p logs/{sample_group}/
+        awk -F'\t' '
+            NR==1 {{
+                for(i=1;i<=NF;i++) {{
+                    if ($i ~ /IC50/) ic50_col = i
+                    if ($i ~ /Mutation/) mut_col = i
+                    if ($i ~ /HLA/) hla_col = i
+                    if ($i ~ /Epitope/) epi_col = i
+                }}
+                print "mutation_id\thla_allele\tepitope_sequence\tic50_nM"
+            }}
+            NR>1 {{
+                print $mut_col "\t" $hla_col "\t" $epi_col "\t" $ic50_col
+            }}
+        ' {input} > {output} 2>&1 | tee {log}
+        if [ ! -s {output} ]; then
+            echo "ERROR: IC50 output for {sample_group} is empty!" && exit 1
+        fi
+        """
+
+# 9. 版本记录
 rule check_versions:
     output: "results/versions.tsv"
     shell:
@@ -195,9 +256,7 @@ rule check_versions:
         echo -e "optitype\t$(optitype_pipeline.py --version | head -1)" >> {output}
         echo -e "gatk\t$(gatk --version | grep "Version" | cut -d' ' -f2)" >> {output}
         echo -e "pvacseq\t$(pvacseq --version | head -1)" >> {output}
-        # 新增：NetMHCpan（IC50预测核心工具）版本
         echo -e "netmhcpan\t$(netMHCpan -v | head -1 | awk '{{print $2}}')" >> {output}
-        # 新增：IEDB（IC50分析依赖）版本
-        echo -e "iedb\t$(python {params.netmhc_dir}/tools/iedb_allele_info.py --version 2>&1 | head -1)" >> {output}
+        echo -e "iedb\t$(python {config["netmhc_dir"]}/tools/iedb_allele_info.py --version 2>&1 | head -1)" >> {output}
         """
 
