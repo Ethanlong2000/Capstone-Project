@@ -4,7 +4,7 @@ NEO_ENV = "/home/longyh/miniforge3/envs/neo"  # 替换为你的neo环境路径
 PVACTOOLS_ENV = "/home/longyh/miniforge3/envs/pvactools"  # 替换为你的pvactools路径
 
 # 全局参数校验
-import os
+import os, glob, re
 assert os.path.exists(config["ref_genome"]), f"Ref genome {config['ref_genome']} not found!"
 assert os.path.exists(config["germline_resource"]), "Germline resource not found!"
 assert os.path.exists(config["panel_of_normals"]), "PON not found!"
@@ -12,8 +12,37 @@ assert "epitope_lengths" in config["pvacseq"], "请在config.yaml的pvacseq下�
 assert "netmhc_dir" in config, "请在config.yaml中配置netmhc_dir路径"
 assert "genome_intervals" in config, "请在config.yaml中配置genome_intervals（手动指定区间文件列表）"
 
-# 提取所有样本组名（从config中）
-SAMPLE_GROUPS = list(config["samples"].keys())
+# 自动发现样本组（当 samples 为 'auto' 或空时）
+def autodiscover_samples(data_dir="data"):
+    groups = {}
+    for r1 in sorted(glob.glob(os.path.join(data_dir, "*_tumor_1.fastq.gz"))):
+        base = os.path.basename(r1)
+        grp = re.sub(r"_tumor_1\.fastq\.gz$", "", base)
+        t1 = os.path.join(data_dir, f"{grp}_tumor_1.fastq.gz")
+        t2 = os.path.join(data_dir, f"{grp}_tumor_2.fastq.gz")
+        n1 = os.path.join(data_dir, f"{grp}_normal_1.fastq.gz")
+        n2 = os.path.join(data_dir, f"{grp}_normal_2.fastq.gz")
+        if all(os.path.exists(p) for p in (t1, t2, n1, n2)):
+            # 文件名中样本名就是 tumor/normal
+            groups[grp] = {"tumor": "tumor", "normal": "normal"}
+    return groups
+
+if not isinstance(config.get("samples", {}), dict) or config.get("samples") in (None, "auto") or len(config.get("samples", {})) == 0:
+    config["samples"] = autodiscover_samples()
+    assert config["samples"], "自动发现失败：请确保 data/ 下存在 {group}_{tumor|normal}_{1,2}.fastq.gz 成对文件。"
+
+# 提取所有样本组名（从config或自动发现）
+# 自动发现/读取完成后
+ALL_GROUPS = list(config["samples"].keys())
+
+# 允许用 --config sample_groups=Pt8,Pt9 或环境变量 SAMPLE_GROUPS=Pt8,Pt9 来筛选
+_selected = config.get("sample_groups") or os.environ.get("SAMPLE_GROUPS")
+if _selected:
+    SAMPLE_GROUPS = [g.strip() for g in str(_selected).split(",") if g.strip()]
+    unknown = [g for g in SAMPLE_GROUPS if g not in ALL_GROUPS]
+    assert not unknown, f"未知样本组: {unknown}；可选: {ALL_GROUPS}"
+else:
+    SAMPLE_GROUPS = ALL_GROUPS
 
 rule all:
     input:
@@ -66,7 +95,7 @@ rule align_and_dedup:
         sambamba index -t {threads} {output.bam}
         rm -rf {params.tmp_dir}
         """
-
+#3 HLA分型
 rule hla_typing:
     input:
         r1=lambda wc: f"data/{wc.sample_group}_tumor_1.fastq.gz",

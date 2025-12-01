@@ -10,10 +10,10 @@ samples:
 # 按工具特性分配线程（根据服务器核心数调整）
 threads:
   fastqc: 4          # FastQC质控线程
-  align: 16          # 比对/排序/去重线程
+  align: 32          # 比对/排序/去重线程
   hla: 8             # HLA分型（Optitype）线程
-  mutect2: 8         # Mutect2每个区间线程
-  pvacseq: 32        # pVACseq新抗原预测线程
+  mutect2: 12         # Mutect2每个区间线程
+  pvacseq: 24        # pVACseq新抗原预测线程
 
 # ===================== 参考基因组与资源 =====================
 # 建议使用GRCh38（临床分析首选），需提前下载并构建索引
