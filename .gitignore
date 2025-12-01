@@ -1,3 +1,50 @@
 raw/
 fastq/
 processed/
+# 原始测序数据
+*.fastq
+*.fq
+*.fastq.gz
+*.fq.gz
+
+# 比对结果
+*.bam
+*.bai
+*.sam
+
+# 变异调用结果
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.maf
+
+# HLA 分型中间/结果文件（根据你用的工具调整）
+*.hla.*
+hla_*
+*HLA*
+
+# NetMHCpan 输入/输出
+*.pep
+*.txt  # 注意：如果 .txt 也用于文档，可改用更具体的路径如 results/netmhc/*.txt
+netmhc_*.out
+netmhcpan_*.txt
+
+# 临时/日志文件
+*.tmp
+*.log
+*.stderr
+*.stdout
+
+# Snakemake / Nextflow 工作目录（如适用）
+.snakemake/
+work/
+results/
+logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter Notebook 输出
+*.ipynb_checkpoints/
