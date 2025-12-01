@@ -1,0 +1,17 @@
+name: neo
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - bcftools
+  - bwa-mem2
+  - gatk4
+  - htslib
+  - numpy
+  - openpyxl
+  - pandas
+  - sambamba
+  - samtools
+  - snakemake
+
+prefix: "/home/longyh/miniforge3/envs/neo"
