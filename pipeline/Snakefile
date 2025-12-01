@@ -27,19 +27,17 @@ rule all:
 # 1. 质控：FastQC
 rule fastqc:
     input:
-        # 输入fastq路径：data/{样本组}_{tumor/normal}_1.fastq.gz（需对齐你的数据命名）
         r1 = "data/{sample_group}_{sample}_1.fastq.gz",
         r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        # 输出带样本组名，避免覆盖
         html1 = "qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
         html2 = "qc/fastqc/{sample_group}_{sample}_2_fastqc.html"
     threads: config["threads"]["fastqc"]
-    log: "logs/{sample_group}/fastqc/{sample}.log"  # 日志也按样本组分
+    log: "logs/{sample_group}/fastqc/{sample}.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p logs/{sample_group}/fastqc/  # 确保样本组日志目录存在
+        mkdir -p $(dirname {log}) qc/fastqc/
         fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
         """
 
@@ -49,7 +47,6 @@ rule align_and_dedup:
         r1 = "data/{sample_group}_{sample}_1.fastq.gz",
         r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        # BAM文件按样本组存放，避免多样本覆盖
         bam = "bam/{sample_group}/{sample}.sorted.dedup.bam",
         bai = "bam/{sample_group}/{sample}.sorted.dedup.bam.bai"
     threads: config["threads"]["align"]
@@ -60,7 +57,7 @@ rule align_and_dedup:
     shell:
         """
         set -euo pipefail
-        mkdir -p {params.tmp_dir} logs/{sample_group}/align/ bam/{sample_group}/
+        mkdir -p {params.tmp_dir} $(dirname {log}) bam/{wildcards.sample_group}/
         bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
         sambamba view -S -f bam /dev/stdin | \
         sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam} --compression-level 6 /dev/stdin 2>&1 | tee {log}
@@ -70,17 +67,16 @@ rule align_and_dedup:
         rm -rf {params.tmp_dir}
         """
 
-# 3. HLA分型（按样本组运行，每个样本组单独出结果）
 rule hla_typing:
     input:
-        r1=lambda wc: f"data/{config['samples'][wc.sample_group]['tumor']}_1.fastq.gz",
-        r2=lambda wc: f"data/{config['samples'][wc.sample_group]['tumor']}_2.fastq.gz"
+        r1=lambda wc: f"data/{wc.sample_group}_tumor_1.fastq.gz",
+        r2=lambda wc: f"data/{wc.sample_group}_tumor_2.fastq.gz"
     output:
         tsv="results/{sample_group}/hla/results.tsv",
         genotype="results/{sample_group}/hla/{sample_group}_HLA_genotype.txt"
     params:
-        sample_name=lambda wc: config['samples'][wc.sample_group]['tumor'],
-        outdir="results/{sample_group}/hla"
+        sample_name=lambda wc: f"{wc.sample_group}_tumor",
+        outdir=lambda wc: f"results/{wc.sample_group}/hla"
     threads: config["threads"]["hla"]
     log: "logs/{sample_group}/hla_typing.log"
     container: "docker://fred2/optitype"
@@ -104,7 +100,6 @@ rule hla_typing:
 # 4. Mutect2 scatter（按样本组+手动区间拆分）
 rule mutect2_scatter:
     input:
-        # 按样本组从config中获取tumor/normal样本名，匹配bam文件
         tumor = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['tumor']}.sorted.dedup.bam",
         normal = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['normal']}.sorted.dedup.bam"
     output:
@@ -113,14 +108,13 @@ rule mutect2_scatter:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
         pon = config["panel_of_normals"],
-        # 从config的genome_intervals中匹配当前interval_name对应的完整路径
         interval_path = lambda wildcards: [p for p in config["genome_intervals"] if os.path.splitext(os.path.basename(p))[0] == wildcards.interval_name][0]
     threads: config["threads"]["mutect2"]
     log: "logs/{sample_group}/mutect2/{interval_name}.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p vcf/{sample_group}/mutect2/ logs/{sample_group}/mutect2/
+        mkdir -p vcf/{wildcards.sample_group}/mutect2/ $(dirname {log})
         gatk Mutect2 \
             -R {params.ref} \
             -I {input.tumor} -tumor tumor \
@@ -140,16 +134,16 @@ def get_interval_names(wildcards):
 
 rule mutect2_gather:
     input:
-        expand("vcf/{sample_group}/mutect2/{interval_name}.vcf.gz", 
-               sample_group=SAMPLE_GROUPS,
-               interval_name=get_interval_names)
+        lambda wc: expand("vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
+                          sample_group=wc.sample_group,
+                          interval_name=get_interval_names(wc))
     output:
         "vcf/{sample_group}/somatic.vcf.gz"
     log: "logs/{sample_group}/mutect2_gather.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p vcf/{sample_group}/ logs/{sample_group}/
+        mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
         gatk MergeVcfs -I {input} -O {output} 2>&1 | tee {log}
         tabix -p vcf {output}
         """
@@ -158,25 +152,23 @@ rule mutect2_gather:
 rule pvacseq:
     input:
         vcf = "vcf/{sample_group}/somatic.vcf.gz",
-        hla = "results/{sample_group}/hla/results.tsv"  # 匹配每个样本组的HLA结果
+        hla = "results/{sample_group}/hla/results.tsv"
     output:
         "results/{sample_group}/final.neoantigens.tsv"
     params:
         sample_name = "{sample_group}",
         netmhc_dir = config["netmhc_dir"],
-        epitope_lengths = config["pvacseq"]["epitope_lengths"]  # 关键修复：用=代替:
+        epitope_lengths = config["pvacseq"]["epitope_lengths"]
     threads: config["threads"]["pvacseq"]
     log: "logs/{sample_group}/pvacseq.log"
     shell:
         """
         set -euo pipefail
-        # 激活pvactools环境（建议用绝对路径避免冲突）
         source activate {PVACTOOLS_ENV}
-        mkdir -p results/{sample_group}/ logs/{sample_group}/
+        mkdir -p results/{wildcards.sample_group}/ $(dirname {log})
         if [ ! -s {input.hla} ]; then
             echo "ERROR: HLA typing result {input.hla} is empty!" && exit 1
         fi
-        # 提取HLA等位基因（兼容Optitype输出格式）
         HLA_ALLELES=$(awk -F'\t' '
             NR==2 {{
                 for(i=2;i<=7;i++) {{
@@ -188,28 +180,25 @@ rule pvacseq:
             }}
         ' {input.hla} | sed 's/,$//')
         if [ -z "$HLA_ALLELES" ]; then
-            echo "ERROR: Failed to extract HLA alleles for {sample_group}!" && exit 1
+            echo "ERROR: Failed to extract HLA alleles for {wildcards.sample_group}!" && exit 1
         fi
-        # 运行pvacseq
         pvacseq run \
             {input.vcf} \
             {params.sample_name} \
             "$HLA_ALLELES" \
             NetMHCpan \
-            results/{sample_group}/pvacseq/ \
+            results/{wildcards.sample_group}/pvacseq/ \
             -e {params.epitope_lengths} \
             --iedb-install-directory {params.netmhc_dir} \
             --n-threads {threads} \
             --net-chop-method cterm \
             --netmhc-stab \
             --pass-only 2>&1 | tee {log}
-        # 复制最终结果（兼容pvacseq输出路径）
-        PVAC_OUTPUT="results/{sample_group}/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
+        PVAC_OUTPUT="results/{wildcards.sample_group}/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
         if [ ! -f "$PVAC_OUTPUT" ]; then
-            echo "ERROR: pVACseq output $PVAC_OUTPUT not found for {sample_group}!" && exit 1
+            echo "ERROR: pVACseq output $PVAC_OUTPUT not found for {wildcards.sample_group}!" && exit 1
         fi
         cp "$PVAC_OUTPUT" {output}
-        # 退出环境
         source deactivate
         """
 
@@ -221,7 +210,7 @@ rule extract_ic50:
     shell:
         """
         set -euo pipefail
-        mkdir -p logs/{sample_group}/
+        mkdir -p $(dirname {log})
         awk -F'\t' '
             NR==1 {{
                 ic50_col=-1; mut_col=-1; hla_col=-1; epi_col=-1;
@@ -241,7 +230,7 @@ rule extract_ic50:
             }}
         ' {input} > {output} 2>&1 | tee {log}
         if [ ! -s {output} ]; then
-            echo "ERROR: IC50 output for {sample_group} is empty!" && exit 1
+            echo "ERROR: IC50 output for {wildcards.sample_group} is empty!" && exit 1
         fi
         """
 
