@@ -105,7 +105,8 @@ rule hla_typing:
         genotype="results/{sample_group}/hla/{sample_group}_HLA_genotype.txt"
     params:
         sample_name=lambda wc: f"{wc.sample_group}_tumor",
-        outdir=lambda wc: f"results/{wc.sample_group}/hla"
+        outdir=lambda wc: f"results/{wc.sample_group}/hla",
+        mode="dna"  # 若为RNA-seq，请改为 "rna"
     threads: config["threads"]["hla"]
     log: "logs/{sample_group}/hla_typing.log"
     container: "docker://fred2/optitype"
@@ -114,14 +115,14 @@ rule hla_typing:
         set -euo pipefail
         mkdir -p {params.outdir}
 
-        optitype_pipeline.py \
-            -i {input.r1} {input.r2} \
-            -o {params.outdir} \
-            --sample-name {params.sample_name} \
-            --threads {threads} \
-            --enumerate 2 \
-            -d 2>&1 | tee {log}
+        OptiTypePipeline.py \
+            --input {input.r1} {input.r2} \
+            --{params.mode} \
+            --outdir {params.outdir} \
+            --prefix {params.sample_name} \
+            --enumerate 2 2>&1 | tee {log}
 
+        # OptiType 会在 outdir 生成 results.tsv 和 {prefix}_result.txt
         [ -f {params.outdir}/results.tsv ] && mv {params.outdir}/results.tsv {output.tsv}
         cp {params.outdir}/{params.sample_name}_result.txt {output.genotype}
         """
