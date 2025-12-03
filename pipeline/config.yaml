@@ -20,7 +20,7 @@ threads:
 ref_genome: "/home/longyh/database/GRCh38.d1.vd1.fa"  # 参考基因组FASTA文件路径
 
 # Mutect2必需资源（germline/PON）
-germline_resource: "/home/longyh/database/gnomad.exomes.r2.1.1.sites.vcf.bgz"  # gnomAD胚系突变库
+germline_resource: "/home/longyh/database/af-only-gnomad.hg38.vcf.gz"  # gnomAD胚系突变库
 panel_of_normals: "/home/longyh/database/1000g_pon.hg38.vcf.gz"  # 正常样本面板（PON）
 
 # ===================== 基因组区间配置 =====================
