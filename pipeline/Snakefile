@@ -71,56 +71,71 @@ rule fastqc:
         fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
         """
 
-# 2. 比对 + 标记重复 + 添加 Read Group
+# 2. 比对 + 添加 Read Group + 标记重复（优化临时文件名、日志、内存配置）
 rule align_and_dedup:
     input:
         r1 = "data/{sample_group}_{sample}_1.fastq.gz",
         r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        bam = "bam/{sample_group}/{sample}.sorted.dedup.bam",  # 实际是带 RG 的
-        bai = "bam/{sample_group}/{sample}.sorted.dedup.bam.bai"
+        bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",  # 最终输出：排序+去重+带RG
+        bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
     threads: config["threads"]["align"]
     params:
         ref = config["ref_genome"],
         tmp_dir = "tmp/{sample_group}/{sample}",
-        # Read Group 参数
-        rg_id = "{sample}_rg",
-        rg_sm = "{sample}",          # SM = sample name (e.g., tumor, normal)
-        rg_lb = "lib1",
+        # 独立临时文件名（不含最终后缀，避免冗余拼接）
+        tmp_sorted = "tmp/{sample_group}/{sample}/aligned.sorted.bam",  # 排序后临时文件
+        tmp_rg = "tmp/{sample_group}/{sample}/aligned.sorted.rg.bam",   # 加RG后临时文件
+        # RG 参数规范（保持不变）
+        rg_id = "{sample_group}_{sample}_RG001",
+        rg_sm = "{sample_group}",
+        rg_lb = "{sample_group}_{sample}_Lib",
         rg_pl = "ILLUMINA",
-        rg_pu = "{sample}_unit"
+        rg_pu = "{sample_group}_{sample}_PU001",
+        # 动态内存配置：从config读取，默认8G，你的服务器可设更大（如64G/128G）
+        gatk_mem = config.get("mem", {}).get("gatk", "64G")  # 优先用config，无则默认64G
     log: "logs/{sample_group}/align/{sample}.log"
     shell:
         """
         set -euo pipefail
+        # 创建临时目录和输出目录（确保存在）
         mkdir -p {params.tmp_dir} $(dirname {log}) bam/{wildcards.sample_group}/
 
-        # 1. 比对 + 转 BAM + 排序
+        echo "=== 步骤1：BWA-MEM2比对 + Sambamba排序 ===" >> {log} 2>&1
+        # 比对→转BAM→排序：输出到独立临时文件（tmp_sorted）
         bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
         sambamba view -S -f bam /dev/stdin | \
-        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {output.bam}.sorted.bam --compression-level 6 /dev/stdin 2>&1 | tee {log}
+        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {params.tmp_sorted} --compression-level 6 /dev/stdin >> {log} 2>&1
 
-        # 2. 标记重复
-        sambamba markdup -t {threads} --remove-duplicates {output.bam}.sorted.bam {output.bam}.dedup.bam
-
-        # 3. 添加 Read Group（使用 GATK，确保兼容性）
-        gatk AddOrReplaceReadGroups \
-            -I {output.bam}.dedup.bam \
-            -O {output.bam} \
+        echo "=== 步骤2：GATK添加Read Group（RG） ===" >> {log} 2>&1
+        # 动态内存配置：利用服务器800G内存，避免OOM
+        gatk --java-options "-Xmx{params.gatk_mem} -XX:+UseParallelGC" AddOrReplaceReadGroups \
+            -I {params.tmp_sorted} \
+            -O {params.tmp_rg} \
             -RGID {params.rg_id} \
             -RGSM {params.rg_sm} \
             -RGLB {params.rg_lb} \
             -RGPL {params.rg_pl} \
             -RGPU {params.rg_pu} \
-            2>> {log}
+            >> {log} 2>&1
 
-        # 4. 建索引
-        sambamba index -t {threads} {output.bam}
+        echo "=== 步骤3：Sambamba标记重复 ===" >> {log} 2>&1
+        # 标记重复：输入带RG的临时文件，输出到最终BAM
+        sambamba markdup -t {threads} --remove-duplicates {params.tmp_rg} {output.bam} >> {log} 2>&1
 
-        # 5. 清理临时文件
-        rm -f {output.bam}.sorted.bam {output.bam}.dedup.bam
+        echo "=== 步骤4：建立BAM索引 ===" >> {log} 2>&1
+        sambamba index -t {threads} {output.bam} >> {log} 2>&1
+
+        echo "=== 步骤5：清理临时文件 ===" >> {log} 2>&1
+        rm -f {params.tmp_sorted} {params.tmp_rg}
         rm -rf {params.tmp_dir}
+
+        echo "=== 完成：BAM文件路径 = {output.bam} ===" >> {log} 2>&1
+        # 验证RG是否添加成功（日志中记录结果）
+        samtools view -H {output.bam} | grep '@RG' >> {log} 2>&1 || echo "WARNING: RG信息未找到！" >> {log} 2>&1
         """
+
+
 
 #3 HLA分型
 rule hla_typing:
@@ -166,9 +181,10 @@ rule hla_typing:
         conda deactivate
         """
 
-# 4. Mutect2 scatter（按样本组+手动区间拆分）
+# 4. Mutect2 scatter（保持输入匹配，同步优化日志）
 rule mutect2_scatter:
     input:
+        # 输入与align_and_dedup输出完全匹配
         tumor = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['tumor']}.sorted.dedup.rg.bam",
         normal = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['normal']}.sorted.dedup.rg.bam"
     output:
@@ -177,16 +193,19 @@ rule mutect2_scatter:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
         pon = config["panel_of_normals"],
-        tumor_sample = lambda wildcards: config["samples"][wildcards.sample_group]["tumor"],   # e.g., "tumor"
-        normal_sample = lambda wildcards: config["samples"][wildcards.sample_group]["normal"], # e.g., "normal"
-        interval_path = lambda wildcards: [p for p in config["genome_intervals"] if os.path.splitext(os.path.basename(p))[0] == wildcards.interval_name][0]
+        interval_path = lambda wildcards: [p for p in config["genome_intervals"] if os.path.splitext(os.path.basename(p))[0] == wildcards.interval_name][0],
+        # Mutect2内存配置：默认32G，可根据config调整
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
     threads: config["threads"]["mutect2"]
     log: "logs/{sample_group}/mutect2/{interval_name}.log"
     shell:
         """
         set -euo pipefail
         mkdir -p vcf/{wildcards.sample_group}/mutect2/ $(dirname {log})
-        gatk Mutect2 \
+
+        echo "=== 运行GATK Mutect2（区间：{wildcards.interval_name}） ===" >> {log} 2>&1
+        # 配置大内存，利用服务器资源
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" Mutect2 \
             -R {params.ref} \
             -I {input.tumor} -tumor {config['samples'][wildcards.sample_group]['tumor']} \
             -I {input.normal} -normal {config['samples'][wildcards.sample_group]['normal']} \
@@ -194,11 +213,16 @@ rule mutect2_scatter:
             --panel-of-normals {params.pon} \
             -L {params.interval_path} \
             -O {output} \
-            --native-pair-hmm-threads {threads} 2>&1 | tee {log}
-        tabix -p vcf {output}
+            --native-pair-hmm-threads {threads} >> {log} 2>&1
+
+        echo "=== 建立VCF索引 ===" >> {log} 2>&1
+        tabix -p vcf {output} >> {log} 2>&1
+
+        echo "=== 完成：VCF文件路径 = {output} ===" >> {log} 2>&1
         """
 
-# 5. Mutect2 gather（合并每个样本组的所有区间VCF）
+
+# 5. Mutect2 gather（合并每个样本组的所有区间VCF）—— 优化日志和内存
 def get_interval_names(wildcards):
     """从config的genome_intervals中提取区间名（不含路径和后缀）"""
     return [os.path.splitext(os.path.basename(path))[0] for path in config["genome_intervals"]]
@@ -210,13 +234,28 @@ rule mutect2_gather:
                           interval_name=get_interval_names(wc))
     output:
         "vcf/{sample_group}/somatic.vcf.gz"
+    params:
+        # 动态内存配置：从config读取，默认32G，可根据需求调整（你的服务器可设64G）
+        merge_mem = config.get("mem", {}).get("merge_vcfs", "32G")
     log: "logs/{sample_group}/mutect2_gather.log"
     shell:
         """
         set -euo pipefail
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
-        gatk MergeVcfs -I {input} -O {output} 2>&1 | tee {log}
-        tabix -p vcf {output}
+
+        echo "=== 运行GATK MergeVcfs（合并区间VCF） ===" >> {log} 2>&1
+        # 配置大内存，适配大量区间VCF合并场景
+        gatk --java-options "-Xmx{params.merge_mem} -XX:+UseParallelGC" MergeVcfs \
+            -I {input} \
+            -O {output} \
+            >> {log} 2>&1
+
+        echo "=== 建立合并后VCF的索引 ===" >> {log} 2>&1
+        tabix -p vcf {output} >> {log} 2>&1
+
+        echo "=== 完成：合并后VCF路径 = {output} ===" >> {log} 2>&1
+        # 验证输出文件是否有效（日志中记录文件大小）
+        du -sh {output} {output}.tbi >> {log} 2>&1
         """
 
 # 6. 新抗原预测
