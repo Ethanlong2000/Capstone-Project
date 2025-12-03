@@ -6,6 +6,9 @@ processed/
 *.fq
 *.fastq.gz
 *.fq.gz
+# 清洗
+*.zip
+*.html
 
 # 比对结果
 *.bam
