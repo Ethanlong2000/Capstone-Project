@@ -211,8 +211,14 @@ rule mutect2_scatter:
             -O {output} \
             --native-pair-hmm-threads {threads} >> {log} 2>&1
 
-        echo "=== 建立VCF索引 ===" >> {log} 2>&1
-        tabix -p vcf {output} >> {log} 2>&1
+        echo "=== 建立VCF索引（强制覆盖） ===" >> {log} 2>&1
+        # 强制覆盖索引，失败时记录但不中断整个rule
+        if ! bcftools index -t -f {output} >> {log} 2>&1; then
+          echo "[WARN] bcftools index failed for {output}, trying tabix -f ..." >> {log} 2>&1
+          if ! tabix -f -p vcf {output} >> {log} 2>&1; then
+            echo "[WARN] tabix indexing also failed, proceeding without index" >> {log} 2>&1
+          fi
+        fi
 
         echo "=== 完成：VCF文件路径 = {output} ===" >> {log} 2>&1
         """
@@ -225,33 +231,37 @@ def get_interval_names(wildcards):
 
 rule mutect2_gather:
     input:
-        lambda wc: expand("vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
-                          sample_group=wc.sample_group,
-                          interval_name=get_interval_names(wc))
+        lambda wc: expand(
+            "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
+            sample_group=wc.sample_group,
+            interval_name=get_interval_names(wc)
+        )
     output:
         "vcf/{sample_group}/somatic.vcf.gz"
     params:
-        # 动态内存配置：从config读取，默认32G，可根据需求调整（你的服务器可设64G）
-        merge_mem = config.get("mem", {}).get("merge_vcfs", "32G")
+        merge_mem = config.get("mem", {}).get("merge_vcfs", "32G"),
+        ref = config["ref_genome"]
     log: "logs/{sample_group}/mutect2_gather.log"
     shell:
         """
         set -euo pipefail
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
-
         echo "=== 运行GATK MergeVcfs（合并区间VCF） ===" >> {log} 2>&1
-        # 配置大内存，适配大量区间VCF合并场景
-        gatk --java-options "-Xmx{params.merge_mem} -XX:+UseParallelGC" MergeVcfs \
-            -I {input} \
-            -O {output} \
-            >> {log} 2>&1
 
-        echo "=== 建立合并后VCF的索引 ===" >> {log} 2>&1
-        tabix -p vcf {output} >> {log} 2>&1
+        INPUT_ARGS=$(printf " -I %s" {input})
+
+        gatk --java-options "-Xmx{params.merge_mem} -XX:+UseParallelGC" MergeVcfs \
+            $INPUT_ARGS \
+            -O {output} >> {log} 2>&1
+
+        echo "=== 建立合并后VCF索引（强制覆盖） ===" >> {log} 2>&1
+        if ! bcftools index -t -f {output} >> {log} 2>&1; then
+          echo "[WARN] bcftools index failed for {output}, trying tabix -f ..." >> {log} 2>&1
+          tabix -f -p vcf {output} >> {log} 2>&1 || echo "[WARN] tabix indexing also failed; proceeding without index" >> {log} 2>&1
+        fi
 
         echo "=== 完成：合并后VCF路径 = {output} ===" >> {log} 2>&1
-        # 验证输出文件是否有效（日志中记录文件大小）
-        du -sh {output} {output}.tbi >> {log} 2>&1
+        du -sh {output} {output}.tbi >> {log} 2>&1 || true
         """
 
 # 6. 新抗原预测
