@@ -264,11 +264,83 @@ rule mutect2_gather:
         du -sh {output} {output}.tbi >> {log} 2>&1 || true
         """
 
-# 6. 新抗原预测
+# 解析与格式化 HLA 列表
+def parse_optitype_tsv(tsv_path):
+    """
+    解析 OptiType 结果 TSV，返回 ['HLA-A*02:01', 'HLA-B*40:01', ...] 列表。
+    策略：
+      - 取第2行作为首选（OptiType 第一行通常是索引/表头，第二行是最佳结果）
+      - 若第2行缺失或为空，回退取第3行
+      - 列名固定 A1, A2, B1, B2, C1, C2，有空值则跳过
+      - 统一前缀为 HLA-，并保留星号与冒号（pVACseq 期望 HLA-A*02:01 格式）
+      - 去重、稳定排序（A, B, C 顺序）
+    """
+    import csv
+    alleles = []
+    try:
+        with open(tsv_path, newline='') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            rows = list(reader)
+            if not rows:
+                return []
+            # 优先使用第1个数据行（在 DictReader 下就是 rows[0]）
+            row = rows[0]
+            # 如果有第二个候选行且第一行某些位点为空，尝试用第二行补全
+            if len(rows) > 1:
+                fallback = rows[1]
+            else:
+                fallback = None
+
+            for locus in ['A1', 'A2', 'B1', 'B2', 'C1', 'C2']:
+                val = (row.get(locus) or '').strip()
+                if not val and fallback:
+                    val = (fallback.get(locus) or '').strip()
+                if val:
+                    # OptiType 输出如 A*02:01，需要加 HLA- 前缀并保留格式
+                    if not val.startswith('HLA-'):
+                        val = f'HLA-{val}'
+                    alleles.append(val)
+
+        # 去重并按基因座排序（A,B,C 优先，内部按字典序）
+        def sort_key(h):
+            # HLA-A*02:01 -> ('A', 'A*02:01')
+            try:
+                gene = h.split('-')[1].split('*')[0]  # A, B, C
+            except Exception:
+                gene = 'Z'
+            return (['A', 'B', 'C'].index(gene) if gene in ['A', 'B', 'C'] else 9, h)
+
+        unique = sorted(set(alleles), key=sort_key)
+        return unique
+    except Exception:
+        return []
+
+rule hla_format:
+    input:
+        tsv = "results/{sample_group}/hla/{sample_group}_normal_result.tsv"
+    output:
+        alleles = "results/{sample_group}/hla/{sample_group}.alleles.txt"
+    log:
+        "logs/{sample_group}/hla_format.log"
+    run:
+        import os
+        os.makedirs(os.path.dirname(str(output.alleles)), exist_ok=True)
+        alleles = parse_optitype_tsv(str(input.tsv))
+        with open(str(log), 'w') as lg:
+            if not alleles:
+                lg.write(f"ERROR: No HLA alleles parsed from {input.tsv}\n")
+                raise ValueError(f"No HLA alleles parsed from {input.tsv}")
+            lg.write(f"[INFO] Parsed alleles: {','.join(alleles)}\n")
+        with open(str(output.alleles), 'w') as out:
+            out.write(','.join(alleles) + '\n')
+
+
+# 6. 新抗原预测（改为依赖 hla_format 的输出）
 rule pvacseq:
     input:
         vcf = "vcf/{sample_group}/somatic.vcf.gz",
-        hla = "results/{sample_group}/hla/{sample_group}_normal_result.tsv"
+        hla_tsv = "results/{sample_group}/hla/{sample_group}_normal_result.tsv",
+        hla_list = "results/{sample_group}/hla/{sample_group}.alleles.txt"
     output:
         "results/{sample_group}/final.neoantigens.tsv"
     params:
@@ -282,22 +354,19 @@ rule pvacseq:
         set -euo pipefail
         source activate {PVACTOOLS_ENV}
         mkdir -p results/{wildcards.sample_group}/ $(dirname {log})
-        if [ ! -s {input.hla} ]; then
-            echo "ERROR: HLA typing result {input.hla} is empty!" && exit 1
+
+        if [ ! -s {input.hla_tsv} ]; then
+            echo "ERROR: HLA typing result {input.hla_tsv} is empty!" | tee {log}
+            exit 1
         fi
-        HLA_ALLELES=$(awk -F'\t' '
-            NR==2 {{
-                for(i=2;i<=7;i++) {{
-                    if ($i != "") {{
-                        gsub(/\*/, "", $i);
-                        printf "%s,", $i
-                    }}
-                }}
-            }}
-        ' {input.hla} | sed 's/,$//')
-        if [ -z "$HLA_ALLELES" ]; then
-            echo "ERROR: Failed to extract HLA alleles for {wildcards.sample_group}!" && exit 1
+        if [ ! -s {input.hla_list} ]; then
+            echo "ERROR: Formatted HLA list {input.hla_list} is empty!" | tee -a {log}
+            exit 1
         fi
+
+        HLA_ALLELES=$(cat {input.hla_list} | tr -d '\\n')
+        echo "[INFO] Using HLA alleles: $HLA_ALLELES" | tee -a {log}
+
         pvacseq run \
             {input.vcf} \
             {params.sample_name} \
@@ -309,10 +378,12 @@ rule pvacseq:
             --n-threads {threads} \
             --net-chop-method cterm \
             --netmhc-stab \
-            --pass-only 2>&1 | tee {log}
+            --pass-only 2>&1 | tee -a {log}
+
         PVAC_OUTPUT="results/{wildcards.sample_group}/pvacseq/MHC_Class_I/{params.sample_name}.final.tsv"
         if [ ! -f "$PVAC_OUTPUT" ]; then
-            echo "ERROR: pVACseq output $PVAC_OUTPUT not found for {wildcards.sample_group}!" && exit 1
+            echo "ERROR: pVACseq output $PVAC_OUTPUT not found for {wildcards.sample_group}!" | tee -a {log}
+            exit 1
         fi
         cp "$PVAC_OUTPUT" {output}
         source deactivate
