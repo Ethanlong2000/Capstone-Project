@@ -77,23 +77,20 @@ rule align_and_dedup:
         r1 = "data/{sample_group}_{sample}_1.fastq.gz",
         r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
-        bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",  # 最终输出：排序+去重+带RG
+        bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",
         bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
     threads: config["threads"]["align"]
     params:
         ref = config["ref_genome"],
         tmp_dir = "tmp/{sample_group}/{sample}",
-        # 独立临时文件名（不含最终后缀，避免冗余拼接）
-        tmp_sorted = "tmp/{sample_group}/{sample}/aligned.sorted.bam",  # 排序后临时文件
-        tmp_rg = "tmp/{sample_group}/{sample}/aligned.sorted.rg.bam",   # 加RG后临时文件
-        # RG 参数规范（保持不变）
+        tmp_sorted = "tmp/{sample_group}/{sample}/aligned.sorted.bam",
+        tmp_rg = "tmp/{sample_group}/{sample}/aligned.sorted.rg.bam",
         rg_id = "{sample_group}_{sample}_RG001",
-        rg_sm = "{sample_group}",
+        rg_sm = "{sample_group}_{sample}",   # 修正：使肿瘤/正常的SM不同
         rg_lb = "{sample_group}_{sample}_Lib",
         rg_pl = "ILLUMINA",
         rg_pu = "{sample_group}_{sample}_PU001",
-        # 动态内存配置：从config读取，默认8G，你的服务器可设更大（如64G/128G）
-        gatk_mem = config.get("mem", {}).get("gatk", "64G")  # 优先用config，无则默认64G
+        gatk_mem = config.get("mem", {}).get("gatk", "64G")
     log: "logs/{sample_group}/align/{sample}.log"
     shell:
         """
@@ -184,7 +181,6 @@ rule hla_typing:
 # 4. Mutect2 scatter（保持输入匹配，同步优化日志）
 rule mutect2_scatter:
     input:
-        # 输入与align_and_dedup输出完全匹配
         tumor = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['tumor']}.sorted.dedup.rg.bam",
         normal = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['normal']}.sorted.dedup.rg.bam"
     output:
@@ -194,8 +190,9 @@ rule mutect2_scatter:
         germline = config["germline_resource"],
         pon = config["panel_of_normals"],
         interval_path = lambda wildcards: [p for p in config["genome_intervals"] if os.path.splitext(os.path.basename(p))[0] == wildcards.interval_name][0],
-        # Mutect2内存配置：默认32G，可根据config调整
-        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G"),
+        tumor_id = lambda wc: f"{wc.sample_group}_tumor",   # 新增：与对齐时RGSM一致
+        normal_id = lambda wc: f"{wc.sample_group}_normal"  # 新增
     threads: config["threads"]["mutect2"]
     log: "logs/{sample_group}/mutect2/{interval_name}.log"
     shell:
@@ -204,11 +201,10 @@ rule mutect2_scatter:
         mkdir -p vcf/{wildcards.sample_group}/mutect2/ $(dirname {log})
 
         echo "=== 运行GATK Mutect2（区间：{wildcards.interval_name}） ===" >> {log} 2>&1
-        # 配置大内存，利用服务器资源
         gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" Mutect2 \
             -R {params.ref} \
-            -I {input.tumor} -tumor {config['samples'][wildcards.sample_group]['tumor']} \
-            -I {input.normal} -normal {config['samples'][wildcards.sample_group]['normal']} \
+            -I {input.tumor} -tumor {params.tumor_id} \
+            -I {input.normal} -normal {params.normal_id} \
             --germline-resource {params.germline} \
             --panel-of-normals {params.pon} \
             -L {params.interval_path} \

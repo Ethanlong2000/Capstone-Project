@@ -1,5 +1,6 @@
 raw/
 fastq/
+tmp/
 processed/
 # 原始测序数据
 *.fastq
@@ -20,6 +21,7 @@ processed/
 *.vcf.gz
 *.vcf.gz.tbi
 *.maf
+*.stats
 
 # HLA 分型中间/结果文件（根据你用的工具调整）
 *.hla.*
