@@ -349,30 +349,31 @@ rule vep_annotate:
         tbi = "vcf/{sample_group}/somatic.vep.vcf.gz.tbi"
     params:
         conda_base = "/home/longyh/miniforge3",
-        pvac_env = PVACTOOLS_ENV,  # 在 pvactools 环境中调用 vep
+        pvac_env = PVACTOOLS_ENV,
         cache_dir = config["vep"]["cache_dir"],
-        assembly = config["vep"]["assembly"],  # 例如 GRCh38
-        fasta = config.get("ref_genome"),      # 推荐也提供参考FASTA以提升准确性
-        extra = config["vep"].get("extra_args", ""),  # 可选：传递额外VEP参数
+        assembly = config["vep"]["assembly"],
+        fasta = config.get("ref_genome"),
         vep_mem = config.get("mem", {}).get("vep", "32G")
     threads: config.get("threads", {}).get("vep", 8)
     log: "logs/{sample_group}/vep_annotate.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
+        mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log}) tmp/{wildcards.sample_group}
         exec > >(tee -a {log}) 2>&1
 
+        # 在激活 conda 之前临时关闭 -u，避免 activate 脚本的未定义变量触发错误
+        set +u
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
           source "{params.conda_base}/etc/profile.d/conda.sh"
         else
           eval "$({params.conda_base}/bin/conda shell.bash hook)"
         fi
         conda activate "{params.pvac_env}"
+        set -u
 
         echo "[INFO] Using VEP: $(which vep || echo 'NOT FOUND')"
         echo "[INFO] Input VCF: {input.vcf}"
-        bcftools view -h {input.vcf} | head -n 20 || true
 
         if [ ! -s {input.vcf} ]; then
             echo "ERROR: 输入VCF缺失或为空: {input.vcf}"
@@ -380,9 +381,20 @@ rule vep_annotate:
             exit 1
         fi
 
-        VEP_CMD="vep \
+        # 安全构造 FASTA 参数
+        FASTA_ARG=""
+        if [ -n "{params.fasta}" ] && [ "{params.fasta}" != "None" ]; then
+          FASTA_ARG="--fasta {params.fasta}"
+        fi
+
+        RAW_OUT="tmp/{wildcards.sample_group}/vep_raw.vcf.gz"
+        SORT_TMP="tmp/{wildcards.sample_group}/vep_sort_tmp"
+        mkdir -p "$SORT_TMP"
+
+        echo "[INFO] Running VEP with threads={threads}, assembly={params.assembly}"
+        vep \
           --input_file {input.vcf} \
-          --output_file STDOUT \
+          --output_file "$RAW_OUT" \
           --vcf \
           --compress_output bgzip \
           --cache \
@@ -391,6 +403,8 @@ rule vep_annotate:
           --assembly {params.assembly} \
           --fork {threads} \
           --no_stats \
+          --quiet \
+          --no_progress \
           --max_af \
           --symbol \
           --hgvs \
@@ -399,18 +413,22 @@ rule vep_annotate:
           --af_1kg \
           --af_gnomad \
           --variant_class \
-          --polyphen \
-          --sift \
+          --polyphen b \
+          --sift b \
           --distance 500 \
-          {('--fasta ' + params.fasta) if params.fasta else ''} \
-          {params.extra}
-        "
+          --force_overwrite \
+          $FASTA_ARG \
+          2>> {log}
 
-        echo "[INFO] Running VEP with threads={threads}, assembly={params.assembly}"
-        echo "[DEBUG] VEP command: $VEP_CMD"
+        # 验证 VEP 原始输出是否为有效 VCF
+        if ! bcftools view -h "$RAW_OUT" | grep -q 'ID=CSQ'; then
+          echo "ERROR: VEP 原始输出未包含 CSQ 注释头：$RAW_OUT"
+          conda deactivate || true
+          exit 1
+        fi
 
-        bash -c "$VEP_CMD" | tee >(bcftools view -h - | grep -E '^##|^#' > /dev/null || true) | \
-          bcftools sort -m {params.vep_mem} -T tmp/{wildcards.sample_group}/vep_sort_tmp | \
+        # 排序并重新输出为目标路径
+        bcftools sort -m {params.vep_mem} -T "$SORT_TMP" "$RAW_OUT" | \
           bgzip -@ {threads} -c > {output.vcf}
 
         if ! bcftools index -t -f {output.vcf}; then
@@ -424,12 +442,14 @@ rule vep_annotate:
           exit 1
         fi
         echo "[INFO] VEP annotation completed: {output.vcf}"
-
+        # 在 deactivate 之前关闭 -u，避免 conda 的 deactivate 钩子触发未定义变量错误
+        set +u
         conda deactivate || true
+        set -u
         """
 
 
-# 7. 新抗原预测
+# 8. 新抗原预测
 rule pvacseq:
     input:
         vcf = "vcf/{sample_group}/somatic.vep.vcf.gz",
@@ -510,7 +530,7 @@ rule pvacseq:
         conda deactivate || true
         """
 
-# 8. IC50结合亲和力汇总
+# 9. IC50结合亲和力汇总
 rule extract_ic50:
     input: "results/{sample_group}/final.neoantigens.tsv"
     output: "results/{sample_group}/ic50_binding_affinity.tsv"
