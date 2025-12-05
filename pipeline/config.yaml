@@ -6,14 +6,18 @@ samples:
     tumor: tumor
     normal: normal
 
-# ===================== 线程配置 =====================
+# ===================== 资源配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
 threads:
   fastqc: 4          # FastQC质控线程
   align: 32          # 比对/排序/去重线程
   hla: 8             # HLA分型（Optitype）线程
   mutect2: 12         # Mutect2每个区间线程
+  vep: 8             # VEP注释线程
   pvacseq: 24        # pVACseq新抗原预测线程
+
+mem:
+  vep: 32G           # VEP内存分配
 
 # ===================== 参考基因组与资源 =====================
 # 建议使用GRCh38（临床分析首选），需提前下载并构建索引
@@ -40,9 +44,16 @@ genome_intervals:
 
 # ===================== 工具路径与参数 =====================
 # IEDB/NetMHCpan安装路径（pVACseq依赖）
-netmhc_dir: "/home/longyh/bin/netMHCpan"  # NetMHCpan等工具安装目录
+netmhc_dir: "/home/longyh/software"  # NetMHCpan等工具安装目录
 
 ic50_cutoff: 500  # IC50阈值（nM），<500为高亲和力
+
+# VEP参数配置（可根据需求调整）
+vep:
+  cache_dir: /home/longyh/database/vep  # 替换为你实际的 VEP 缓存目录
+  assembly: GRCh38              # 或 GRCh37，需与参考一致
+  extra_args:
+#  "--everything --allele_number --no_escape"  # 可选，按需扩展 
 
 # pVACseq参数（可根据需求调整）
 pvacseq:
