@@ -588,25 +588,19 @@ rule pvacseq_collect:
         fi
         """
 
-# 9. 提取新抗原预测核心特征（用于TNB计算）
+# 9. 提取新抗原核心特征（仅含可用字段）
 rule extract_neoantigen_features:
-    input:
-        done = "results/{sample_group}/pvacseq_vep/pvacseq.done",
-        tsv  = "results/{sample_group}/pvacseq_vep/MHC_Class_I/{sample_group}_tumor.MHC_I.all_epitopes.aggregated.tsv"
-    output:
-        "results/{sample_group}/neoantigen_features.tsv"
-    log:
-        "logs/{sample_group}/extract_neoantigen_features.log"
+    input: "results/{sample_group}/pvacseq_vep/MHC_Class_I/{sample_group}_tumor.MHC_I.all_epitopes.aggregated.tsv"
+    output: "results/{sample_group}/neoantigen_features.tsv"
+    log: "logs/{sample_group}/extract_neoantigen_features.log"
     shell:
         """
         set -euo pipefail
         mkdir -p $(dirname {log})
         awk -F'\t' '
             NR==1 {{
-                # 初始化列索引
                 id_col = -1; allele_col = -1; peptide_col = -1
-                ic50_mt_col = -1; ic50_wt_col = -1
-                rna_expr_col = -1; dna_vaf_col = -1
+                ic50_mt_col = -1; ic50_wt_col = -1; dna_vaf_col = -1
 
                 for(i=1; i<=NF; i++) {{
                     if ($i == "ID") id_col = i
@@ -614,44 +608,34 @@ rule extract_neoantigen_features:
                     else if ($i == "Best Peptide") peptide_col = i
                     else if ($i == "IC50 MT") ic50_mt_col = i
                     else if ($i == "IC50 WT") ic50_wt_col = i
-                    else if ($i == "RNA Expr") rna_expr_col = i
                     else if ($i == "DNA VAF") dna_vaf_col = i
                 }}
 
-                # 检查必需列
-                if (id_col == -1 || allele_col == -1 || peptide_col == -1 || ic50_mt_col == -1) {{
-                    print "ERROR: Required columns not found!" > "/dev/stderr"
+                if (id_col == -1 || ic50_mt_col == -1) {{
+                    print "ERROR: Critical columns (ID or IC50 MT) missing!" > "/dev/stderr"
                     exit 1
                 }}
-                if (ic50_wt_col == -1 || rna_expr_col == -1 || dna_vaf_col == -1) {{
-                    print "WARNING: Optional columns (IC50 WT / RNA Expr / DNA VAF) not found. Strategy 2-4 may be affected." > "/dev/stderr"
-                }}
 
-                # 输出标准化列名
-                print "mutation_id\thla_allele\tepitope_sequence\tic50_mt_nM\tic50_wt_nM\tgene_tpm\tdna_vaf"
+                print "mutation_id\thla_allele\tepitope_sequence\tic50_mt_nM\tic50_wt_nM\tdna_vaf"
             }}
             NR>1 {{
-                # 提取字段（缺失字段输出为 NA）
                 id_val = (id_col > 0) ? $id_col : "NA"
                 allele_val = (allele_col > 0) ? $allele_col : "NA"
                 peptide_val = (peptide_col > 0) ? $peptide_col : "NA"
                 ic50_mt_val = (ic50_mt_col > 0) ? $ic50_mt_col : "NA"
                 ic50_wt_val = (ic50_wt_col > 0) ? $ic50_wt_col : "NA"
-                rna_expr_val = (rna_expr_col > 0) ? $rna_expr_col : "NA"
                 dna_vaf_val = (dna_vaf_col > 0) ? $dna_vaf_col : "NA"
 
-                # 如果 HLA 等位基因不以 HLA- 开头，自动添加（便于标准化）
                 if (allele_val != "NA" && allele_val !~ /^HLA-/) {{
                     allele_val = "HLA-" allele_val
                 }}
 
-                print id_val "\t" allele_val "\t" peptide_val "\t" ic50_mt_val "\t" ic50_wt_val "\t" rna_expr_val "\t" dna_vaf_val
+                print id_val "\t" allele_val "\t" peptide_val "\t" ic50_mt_val "\t" ic50_wt_val "\t" dna_vaf_val
             }}
-        ' "{input.tsv}" > "{output}" 2> >(tee "{log}" >&2)
+        ' "{input}" > "{output}" 2> >(tee "{log}" >&2)
 
         if [ ! -s "{output}" ]; then
             echo "ERROR: Output file is empty!" >&2
             exit 1
         fi
         """
-
