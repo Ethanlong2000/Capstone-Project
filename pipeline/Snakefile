@@ -536,16 +536,13 @@ rule pvacseq_run:
 
 # 8b. 新抗原结果收集（兼容 .final.tsv 与 .tsv；标记缺失时不强制重算）
 rule pvacseq_collect:
-    # 不再把 done 作为硬输入；改为通过 shell 逻辑自检
-    input:
-        # 可保留为空或依赖上游的 hla_format/vep_annotate 产物，按需
     output:
         "results/{sample_group}/final.neoantigens.tsv"
     params:
         tumor_id = lambda wc: f"{wc.sample_group}_tumor",
         outdir = lambda wc: f"results/{wc.sample_group}/pvacseq_vep",
-        conda_base = "/home/longyh/miniforge3",   # 用于可选补标记时
-        pvac_env = PVACTOOLS_ENV
+        # 将清理开关预先计算到 params，避免在 shell 里写 Python 表达式
+        cleanup_flag = lambda wc: str(config.get("pvacseq", {}).get("cleanup_temp", True)).lower()
     log: "logs/{sample_group}/pvacseq_collect.log"
     shell:
         """
@@ -568,7 +565,6 @@ rule pvacseq_collect:
             cp "$PVAC_OUTPUT_RAW" {output}
         else
             echo "[ERROR] pVACseq outputs not found (checked: $PVAC_OUTPUT_FINAL and $PVAC_OUTPUT_RAW)"
-            echo "[HINT] 请先运行 pvacseq_run 或确保目录中已有 pVACseq 结果文件。"
             ls -l "$OUTDIR/MHC_Class_I" || true
             exit 1
         fi
@@ -580,8 +576,8 @@ rule pvacseq_collect:
         fi
 
         # 正则化清理 *.tsv_[0-9]+-[0-9]+
-        CLEANUP="{config.get('pvacseq', {}).get('cleanup_temp', True)}"
-        if [ "$CLEANUP" = "True" ] || [ "$CLEANUP" = "true" ] || [ "$CLEANUP" = "1" ]; then
+        CLEANUP="{params.cleanup_flag}"
+        if [ "$CLEANUP" = "true" ] || [ "$CLEANUP" = "1" ]; then
           echo "[INFO] Cleaning shard files (*.tsv_[0-9]+-[0-9]+) in $OUTDIR/MHC_Class_I"
           find "$OUTDIR/MHC_Class_I" -maxdepth 1 -type f \
             -regextype posix-extended \
@@ -590,30 +586,7 @@ rule pvacseq_collect:
         else
           echo "[INFO] Skipping temp cleanup per config."
         fi
-        
-
-        # 可选工件收集（若存在则复制）
-        # ART_DIR="results/{wildcards.sample_group}/pvacseq_artifacts"
-        # mkdir -p "$ART_DIR"
-
-        # for f in \
-        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.filtered.tsv" \
-        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.all_epitopes.tsv" \
-        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.all_epitopes.aggregated.tsv" \
-        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.fasta" \
-        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.net_chop.fa" \
-        # ; do
-        #   if [ -f "$f" ]; then
-        #     echo "[INFO] Collecting artifact: $(basename "$f")"
-        #     cp -f "$f" "$ART_DIR/"
-        #   else
-        #     echo "[WARN] Optional artifact missing: $f"
-        #   fi
-        # done
-
-
         """
-
 
 # 9. IC50结合亲和力汇总
 rule extract_ic50:
