@@ -52,8 +52,7 @@ ic50_cutoff: 500  # IC50阈值（nM），<500为高亲和力
 vep:
   cache_dir: /home/longyh/database/vep  # 替换为你实际的 VEP 缓存目录
   assembly: GRCh38              # 或 GRCh37，需与参考一致
-  extra_args:
-#  "--everything --allele_number --no_escape"  # 可选，按需扩展 
+  # extra_args: "--everything --allele_number --no_escape"  # 可选，按需扩展 
 
 # pVACseq参数（可根据需求调整）
 pvacseq:

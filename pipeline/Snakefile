@@ -362,7 +362,6 @@ rule vep_annotate:
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log}) tmp/{wildcards.sample_group}
         exec > >(tee -a {log}) 2>&1
 
-        # 在激活 conda 之前临时关闭 -u，避免 activate 脚本的未定义变量触发错误
         set +u
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
           source "{params.conda_base}/etc/profile.d/conda.sh"
@@ -381,7 +380,6 @@ rule vep_annotate:
             exit 1
         fi
 
-        # 安全构造 FASTA 参数
         FASTA_ARG=""
         if [ -n "{params.fasta}" ] && [ "{params.fasta}" != "None" ]; then
           FASTA_ARG="--fasta {params.fasta}"
@@ -400,11 +398,11 @@ rule vep_annotate:
           --cache \
           --offline \
           --dir_cache {params.cache_dir} \
+          --dir_plugins {params.cache_dir}/Plugins \
           --assembly {params.assembly} \
           --fork {threads} \
           --no_stats \
-          --quiet \
-          --no_progress \
+          --verbose \
           --max_af \
           --symbol \
           --hgvs \
@@ -416,18 +414,20 @@ rule vep_annotate:
           --polyphen b \
           --sift b \
           --distance 500 \
+          --protein \
+          --tsl \
+          --plugin Wildtype \
+          --plugin Frameshift \
           --force_overwrite \
           $FASTA_ARG \
           2>> {log}
 
-        # 验证 VEP 原始输出是否为有效 VCF
         if ! bcftools view -h "$RAW_OUT" | grep -q 'ID=CSQ'; then
           echo "ERROR: VEP 原始输出未包含 CSQ 注释头：$RAW_OUT"
           conda deactivate || true
           exit 1
         fi
 
-        # 排序并重新输出为目标路径
         bcftools sort -m {params.vep_mem} -T "$SORT_TMP" "$RAW_OUT" | \
           bgzip -@ {threads} -c > {output.vcf}
 
@@ -442,40 +442,43 @@ rule vep_annotate:
           exit 1
         fi
         echo "[INFO] VEP annotation completed: {output.vcf}"
-        # 在 deactivate 之前关闭 -u，避免 conda 的 deactivate 钩子触发未定义变量错误
         set +u
         conda deactivate || true
         set -u
         """
 
 
-# 8. 新抗原预测
-rule pvacseq:
+# 8a. 新抗原预测（运行 pvacseq，不检查具体输出文件名）
+rule pvacseq_run:
     input:
         vcf = "vcf/{sample_group}/somatic.vep.vcf.gz",
         hla_list = "results/{sample_group}/hla/{sample_group}.alleles.txt"
     output:
-        "results/{sample_group}/final.neoantigens.tsv"
+        # 产出一个完成标记文件，代表 run 完成，避免尾部文件名差异导致失败
+        done = "results/{sample_group}/pvacseq_vep/pvacseq.done"
     params:
         tumor_id = lambda wc: f"{wc.sample_group}_tumor",
         netmhc_dir = config["netmhc_dir"],
         epitope_lengths = config["pvacseq"]["epitope_lengths"],
         conda_base = "/home/longyh/miniforge3",
-        pvac_env = PVACTOOLS_ENV
+        pvac_env = PVACTOOLS_ENV,
+        outdir = lambda wc: f"results/{wc.sample_group}/pvacseq_vep"
     threads: config["threads"]["pvacseq"]
-    log: "logs/{sample_group}/pvacseq.log"
+    log: "logs/{sample_group}/pvacseq_run.log"
     shell:
         """
         set -euo pipefail
-        mkdir -p results/{wildcards.sample_group}/ $(dirname {log})
+        mkdir -p {params.outdir} $(dirname {log})
         exec > >(tee -a {log}) 2>&1
 
+        set +u
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
           source "{params.conda_base}/etc/profile.d/conda.sh"
         else
           eval "$({params.conda_base}/bin/conda shell.bash hook)"
         fi
         conda activate "{params.pvac_env}"
+        set -u
 
         echo "[DEBUG] pvacseq path: $(which pvacseq || echo 'NOT FOUND')"
         echo "[DEBUG] IEDB dir: {params.netmhc_dir}"
@@ -497,7 +500,6 @@ rule pvacseq:
             exit 1
         fi
 
-        # 校验 VCF 中存在肿瘤样本列
         if ! bcftools query -l {input.vcf} | grep -Fxq "{params.tumor_id}"; then
             echo "ERROR: 期望样本名 {params.tumor_id} 不在 VCF 样本列中: $(bcftools query -l {input.vcf} | tr '\\n' ',')"
             conda deactivate || true
@@ -507,12 +509,16 @@ rule pvacseq:
         HLA_ALLELES=$(tr -d '\\n' < {input.hla_list})
         echo "[INFO] Using HLA alleles: $HLA_ALLELES"
 
+        # 独立输出目录，避免与非VEP输入的历史缓存冲突（若存在则直接复用以支持增量）
+        OUTDIR="{params.outdir}"
+        mkdir -p "$OUTDIR"
+
         pvacseq run \
             {input.vcf} \
             {params.tumor_id} \
             "$HLA_ALLELES" \
             NetMHCpan \
-            results/{wildcards.sample_group}/pvacseq/ \
+            "$OUTDIR" \
             -e1 {params.epitope_lengths} \
             --iedb-install-directory {params.netmhc_dir} \
             --n-threads {threads} \
@@ -520,15 +526,94 @@ rule pvacseq:
             --netmhc-stab \
             --pass-only
 
-        PVAC_OUTPUT="results/{wildcards.sample_group}/pvacseq/MHC_Class_I/{params.tumor_id}.final.tsv"
-        if [ ! -f "$PVAC_OUTPUT" ]; then
-            echo "ERROR: pVACseq output $PVAC_OUTPUT not found"
-            conda deactivate || true
+        # 生成完成标记（不依赖具体文件名）
+        echo "$(date) pvacseq run completed for {params.tumor_id}" > {output.done}
+
+        set +u
+        conda deactivate || true
+        set -u
+        """
+
+# 8b. 新抗原结果收集（兼容 .final.tsv 与 .tsv；标记缺失时不强制重算）
+rule pvacseq_collect:
+    # 不再把 done 作为硬输入；改为通过 shell 逻辑自检
+    input:
+        # 可保留为空或依赖上游的 hla_format/vep_annotate 产物，按需
+    output:
+        "results/{sample_group}/final.neoantigens.tsv"
+    params:
+        tumor_id = lambda wc: f"{wc.sample_group}_tumor",
+        outdir = lambda wc: f"results/{wc.sample_group}/pvacseq_vep",
+        conda_base = "/home/longyh/miniforge3",   # 用于可选补标记时
+        pvac_env = PVACTOOLS_ENV
+    log: "logs/{sample_group}/pvacseq_collect.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p $(dirname {log})
+        exec > >(tee -a {log}) 2>&1
+
+        OUTDIR="{params.outdir}"
+        PVAC_OUTPUT_FINAL="$OUTDIR/MHC_Class_I/{params.tumor_id}.final.tsv"
+        PVAC_OUTPUT_RAW="$OUTDIR/MHC_Class_I/{params.tumor_id}.tsv"
+        DONE="$OUTDIR/pvacseq.done"
+
+        echo "[INFO] Collecting from $OUTDIR"
+
+        if [ -f "$PVAC_OUTPUT_FINAL" ]; then
+            echo "[INFO] Found final output: $PVAC_OUTPUT_FINAL"
+            cp "$PVAC_OUTPUT_FINAL" {output}
+        elif [ -f "$PVAC_OUTPUT_RAW" ]; then
+            echo "[INFO] Found raw output (no .final suffix): $PVAC_OUTPUT_RAW"
+            cp "$PVAC_OUTPUT_RAW" {output}
+        else
+            echo "[ERROR] pVACseq outputs not found (checked: $PVAC_OUTPUT_FINAL and $PVAC_OUTPUT_RAW)"
+            echo "[HINT] 请先运行 pvacseq_run 或确保目录中已有 pVACseq 结果文件。"
+            ls -l "$OUTDIR/MHC_Class_I" || true
             exit 1
         fi
-        cp "$PVAC_OUTPUT" {output}
-        conda deactivate || true
+
+        # 若没有完成标记则自动补齐（避免下次再触发重算）
+        if [ ! -f "$DONE" ]; then
+          echo "[INFO] Creating completion marker: $DONE"
+          echo "$(date) pvacseq outputs present; marking done." > "$DONE"
+        fi
+
+        # 正则化清理 *.tsv_[0-9]+-[0-9]+
+        CLEANUP="{config.get('pvacseq', {}).get('cleanup_temp', True)}"
+        if [ "$CLEANUP" = "True" ] || [ "$CLEANUP" = "true" ] || [ "$CLEANUP" = "1" ]; then
+          echo "[INFO] Cleaning shard files (*.tsv_[0-9]+-[0-9]+) in $OUTDIR/MHC_Class_I"
+          find "$OUTDIR/MHC_Class_I" -maxdepth 1 -type f \
+            -regextype posix-extended \
+            -regex '.+\.tsv_[0-9]+-[0-9]+$' \
+            -print -delete || true
+        else
+          echo "[INFO] Skipping temp cleanup per config."
+        fi
+        
+
+        # 可选工件收集（若存在则复制）
+        # ART_DIR="results/{wildcards.sample_group}/pvacseq_artifacts"
+        # mkdir -p "$ART_DIR"
+
+        # for f in \
+        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.filtered.tsv" \
+        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.all_epitopes.tsv" \
+        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.MHC_I.all_epitopes.aggregated.tsv" \
+        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.fasta" \
+        #   "$OUTDIR/MHC_Class_I/{params.tumor_id}.net_chop.fa" \
+        # ; do
+        #   if [ -f "$f" ]; then
+        #     echo "[INFO] Collecting artifact: $(basename "$f")"
+        #     cp -f "$f" "$ART_DIR/"
+        #   else
+        #     echo "[WARN] Optional artifact missing: $f"
+        #   fi
+        # done
+
+
         """
+
 
 # 9. IC50结合亲和力汇总
 rule extract_ic50:
