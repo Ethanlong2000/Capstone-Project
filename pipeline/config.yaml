@@ -2,9 +2,9 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  Pt8:  # 替换primary，更易区分多样本
-    tumor: tumor
-    normal: normal
+  # Pt8:  # 替换primary，更易区分多样本
+  #   tumor: tumor
+  #   normal: normal
 
 # ===================== 资源配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
@@ -14,7 +14,7 @@ threads:
   hla: 8             # HLA分型（Optitype）线程
   mutect2: 12         # Mutect2每个区间线程
   vep: 8             # VEP注释线程
-  pvacseq: 24        # pVACseq新抗原预测线程
+  pvacseq_run: 24        # pVACseq新抗原预测线程
 
 mem:
   vep: 32G           # VEP内存分配
