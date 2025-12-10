@@ -15,6 +15,7 @@ threads:
   mutect2: 12         # Mutect2每个区间线程
   vep: 8             # VEP注释线程
   pvacseq_run: 24        # pVACseq新抗原预测线程
+  fastp: 8           # fastp质控线程
 
 mem:
   vep: 32G           # VEP内存分配

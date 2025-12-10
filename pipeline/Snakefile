@@ -60,30 +60,64 @@ rule all:
         expand("qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
                sample_group=SAMPLE_GROUPS, sample=["tumor", "normal"])
 
-# 1. 质控：FastQC
-rule fastqc:
+
+# 0. fastp 修剪（去接头+质量截断）
+rule fastp:
     input:
         r1 = "data/{sample_group}_{sample}_1.fastq.gz",
         r2 = "data/{sample_group}_{sample}_2.fastq.gz"
     output:
+        r1 = "trimmed/{sample_group}_{sample}_1.fastq.gz",
+        r2 = "trimmed/{sample_group}_{sample}_2.fastq.gz",
+        json = "qc/fastp/{sample_group}_{sample}.json",
+        html = "qc/fastp/{sample_group}_{sample}.html"
+    threads: config.get("threads", {}).get("fastp", 8)
+    resources:
+        io = 4
+    log: "logs/{sample_group}/fastp/{sample}.log"
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        echo "[START] fastp {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" >> {log}
+        mkdir -p $(dirname {log}) qc/fastp trimmed
+        fastp \
+          -i {input.r1} -I {input.r2} \
+          -o {output.r1} -O {output.r2} \
+          --detect_adapter_for_pe \
+          --qualified_quality_phred 20 \
+          --length_required 30 \
+          --thread {threads} \
+          --json {output.json} \
+          --html {output.html} \
+          > {log} 2>&1
+        echo "[END] fastp {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        """
+
+# 1. 质控：FastQC
+rule fastqc:
+    input:
+        r1 = "trimmed/{sample_group}_{sample}_1.fastq.gz",
+        r2 = "trimmed/{sample_group}_{sample}_2.fastq.gz"
+    output:
         html1 = "qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
         html2 = "qc/fastqc/{sample_group}_{sample}_2_fastqc.html"
     threads: config["threads"]["fastqc"]
-    resources:
-        io = 1
     log: "logs/{sample_group}/fastqc/{sample}.log"
     shell:
         """
         set -euo pipefail
+        SECONDS=0
+        echo "[START] fastqc {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" >> {log}
         mkdir -p $(dirname {log}) qc/fastqc/
         fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
+        echo "[END] fastqc {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')" >> {log}
         """
 
-# 2. 比对 + 添加 Read Group + 标记重复（优化临时文件名、日志、内存配置）
-rule align_and_dedup:
+# 2. 比对 + 添加 Read Group + 标记重复（优化临时文件名、日志、内存配置）rule align_and_dedup:
     input:
-        r1 = "data/{sample_group}_{sample}_1.fastq.gz",
-        r2 = "data/{sample_group}_{sample}_2.fastq.gz"
+        r1 = "trimmed/{sample_group}_{sample}_1.fastq.gz",
+        r2 = "trimmed/{sample_group}_{sample}_2.fastq.gz",
     output:
         bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",
         bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
@@ -96,7 +130,7 @@ rule align_and_dedup:
         tmp_sorted = "tmp/{sample_group}/{sample}/aligned.sorted.bam",
         tmp_rg = "tmp/{sample_group}/{sample}/aligned.sorted.rg.bam",
         rg_id = "{sample_group}_{sample}_RG001",
-        rg_sm = "{sample_group}_{sample}",   # 修正：使肿瘤/正常的SM不同
+        rg_sm = "{sample_group}_{sample}",
         rg_lb = "{sample_group}_{sample}_Lib",
         rg_pl = "ILLUMINA",
         rg_pu = "{sample_group}_{sample}_PU001",
@@ -105,17 +139,18 @@ rule align_and_dedup:
     shell:
         """
         set -euo pipefail
-        # 创建临时目录和输出目录（确保存在）
+        SECONDS=0
+        echo "[START] align_and_dedup {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" >> {log}
         mkdir -p {params.tmp_dir} $(dirname {log}) bam/{wildcards.sample_group}/
+        # 所有 stdout/stderr 同时写日志并打印到屏幕
+        exec > >(tee -a {log}) 2>&1
 
-        echo "=== 步骤1：BWA-MEM2比对 + Sambamba排序 ===" >> {log} 2>&1
-        # 比对→转BAM→排序：输出到独立临时文件（tmp_sorted）
+        echo "=== 步骤1：BWA-MEM2比对 + Sambamba排序 ==="
         bwa-mem2 mem -t {threads} {params.ref} {input.r1} {input.r2} | \
-        sambamba view -S -f bam /dev/stdin | \
-        sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {params.tmp_sorted} --compression-level 6 /dev/stdin >> {log} 2>&1
+          sambamba view -S -f bam /dev/stdin | \
+          sambamba sort -t {threads} --tmpdir {params.tmp_dir} -o {params.tmp_sorted} --compression-level 6 /dev/stdin
 
-        echo "=== 步骤2：GATK添加Read Group（RG） ===" >> {log} 2>&1
-        # 动态内存配置：利用服务器800G内存，避免OOM
+        echo "=== 步骤2：GATK添加Read Group（RG） ==="
         gatk --java-options "-Xmx{params.gatk_mem} -XX:+UseParallelGC" AddOrReplaceReadGroups \
             -I {params.tmp_sorted} \
             -O {params.tmp_rg} \
@@ -123,23 +158,21 @@ rule align_and_dedup:
             -RGSM {params.rg_sm} \
             -RGLB {params.rg_lb} \
             -RGPL {params.rg_pl} \
-            -RGPU {params.rg_pu} \
-            >> {log} 2>&1
+            -RGPU {params.rg_pu}
 
-        echo "=== 步骤3：Sambamba标记重复 ===" >> {log} 2>&1
-        # 标记重复：输入带RG的临时文件，输出到最终BAM
-        sambamba markdup -t {threads} --remove-duplicates {params.tmp_rg} {output.bam} >> {log} 2>&1
+        echo "=== 步骤3：Sambamba标记重复 ==="
+        sambamba markdup -t {threads} --remove-duplicates {params.tmp_rg} {output.bam}
 
-        echo "=== 步骤4：建立BAM索引 ===" >> {log} 2>&1
-        sambamba index -t {threads} {output.bam} >> {log} 2>&1
+        echo "=== 步骤4：建立BAM索引 ==="
+        sambamba index -t {threads} {output.bam}
 
-        echo "=== 步骤5：清理临时文件 ===" >> {log} 2>&1
+        echo "=== 步骤5：清理临时文件 ==="
         rm -f {params.tmp_sorted} {params.tmp_rg}
         rm -rf {params.tmp_dir}
 
-        echo "=== 完成：BAM文件路径 = {output.bam} ===" >> {log} 2>&1
-        # 验证RG是否添加成功（日志中记录结果）
-        samtools view -H {output.bam} | grep '@RG' >> {log} 2>&1 || echo "WARNING: RG信息未找到！" >> {log} 2>&1
+        echo "=== 完成：BAM文件路径 = {output.bam} ==="
+        samtools view -H {output.bam} | grep '@RG' || echo "WARNING: RG信息未找到！"
+        echo "[END] align_and_dedup {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')"
         """
 
 
@@ -147,8 +180,8 @@ rule align_and_dedup:
 #3 HLA分型
 rule hla_typing:
     input:
-        r1 = "data/{sample_group}_normal_1.fastq.gz",
-        r2 = "data/{sample_group}_normal_2.fastq.gz"
+        r1 = "trimmed/{sample_group}_normal_1.fastq.gz",
+        r2 = "trimmed/{sample_group}_normal_2.fastq.gz"
     output:
         tsv = "results/{sample_group}/hla/{sample_group}_normal_result.tsv",
     params:
@@ -163,8 +196,10 @@ rule hla_typing:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
         mkdir -p results/{wildcards.sample_group}/hla "$(dirname {log})"
         exec > >(tee -a {log}) 2>&1
+        echo "[START] hla_typing {wildcards.sample_group} $(date '+%F %T')"
 
         # 初始化并激活 conda
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
@@ -188,6 +223,8 @@ rule hla_typing:
           --enumerate 2
 
         conda deactivate
+        echo "[END] hla_typing {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        
         """
 
 # 4. Mutect2 scatter（保持输入匹配，同步优化日志）
@@ -212,7 +249,9 @@ rule mutect2_scatter:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
         mkdir -p vcf/{wildcards.sample_group}/mutect2/ $(dirname {log})
+        echo "[START] mutect2_scatter {wildcards.sample_group} {wildcards.interval_name} $(date '+%F %T')" >> {log}
 
         echo "=== 运行GATK Mutect2（区间：{wildcards.interval_name}） ===" >> {log} 2>&1
         gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" Mutect2 \
@@ -235,6 +274,8 @@ rule mutect2_scatter:
         fi
 
         echo "=== 完成：VCF文件路径 = {output} ===" >> {log} 2>&1
+        echo "[END] mutect2_scatter {wildcards.sample_group} {wildcards.interval_name} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        
         """
 
 
@@ -261,7 +302,10 @@ rule mutect2_gather:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
+        echo "[START] mutect2_gather {wildcards.sample_group} $(date '+%F %T')" >> {log}
+
         echo "=== 运行GATK MergeVcfs（合并区间VCF） ===" >> {log} 2>&1
 
         INPUT_ARGS=$(printf " -I %s" {input})
@@ -278,6 +322,8 @@ rule mutect2_gather:
 
         echo "=== 完成：合并后VCF路径 = {output} ===" >> {log} 2>&1
         du -sh {output} {output}.tbi >> {log} 2>&1 || true
+        echo "[END] mutect2_gather {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        
         """
 
 # 解析与格式化 HLA 列表
@@ -340,16 +386,22 @@ rule hla_format:
     log:
         "logs/{sample_group}/hla_format.log"
     run:
-        import os
+        import os, datetime
+        t0 = datetime.datetime.now()
         os.makedirs(os.path.dirname(str(output.alleles)), exist_ok=True)
+        with open(str(log), 'a') as lg:
+            lg.write(f"[START] hla_format {wildcards.sample_group} {t0:%F %T}\n")
         alleles = parse_optitype_tsv(str(input.tsv))
-        with open(str(log), 'w') as lg:
+        with open(str(log), 'a') as lg:
             if not alleles:
                 lg.write(f"ERROR: No HLA alleles parsed from {input.tsv}\n")
                 raise ValueError(f"No HLA alleles parsed from {input.tsv}")
             lg.write(f"[INFO] Parsed alleles: {','.join(alleles)}\n")
         with open(str(output.alleles), 'w') as out:
             out.write(','.join(alleles) + '\n')
+        with open(str(log), 'a') as lg:
+            lg.write(f"[END] hla_format {wildcards.sample_group} duration={(datetime.datetime.now()-t0).total_seconds():.1f}s {datetime.datetime.now():%F %T}\n")
+
 
 # 7. VEP注释
 rule vep_annotate:
@@ -371,9 +423,12 @@ rule vep_annotate:
     log: "logs/{sample_group}/vep_annotate.log"
     shell:
         """
-        set -euo pipefail
+        set -euo pipefail 
+        SECONDS=0
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log}) tmp/{wildcards.sample_group}
         exec > >(tee -a {log}) 2>&1
+        echo "[START] vep_annotate {wildcards.sample_group} $(date '+%F %T')"
+
 
         set +u
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
@@ -458,6 +513,8 @@ rule vep_annotate:
         set +u
         conda deactivate || true
         set -u
+        echo "[END] vep_annotate {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        
         """
 
 
@@ -484,8 +541,11 @@ rule pvacseq_run:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
         mkdir -p {params.outdir} $(dirname {log})
         exec > >(tee -a {log}) 2>&1
+        echo "[START] pvacseq_run {wildcards.sample_group} $(date '+%F %T')"
+
 
         set +u
         if [ -f "{params.conda_base}/etc/profile.d/conda.sh" ]; then
@@ -553,6 +613,8 @@ rule pvacseq_run:
         set +u
         conda deactivate || true
         set -u
+        echo "[END] pvacseq_run {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        
         """
 
 
@@ -568,6 +630,9 @@ rule extract_neoantigen_features:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
+        echo "[START] extract_neoantigen_features {wildcards.sample_group} $(date '+%F %T')" >> {log}
+
         mkdir -p $(dirname {log}) $(dirname {output})
         awk -F'\t' '
             NR==1 {{
@@ -611,6 +676,8 @@ rule extract_neoantigen_features:
             echo "ERROR: Output file is empty!" >&2
             exit 1
         fi
+        echo "[END] extract_neoantigen_features {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        
         """
 
 # pVACseq 过程文件清理
@@ -629,8 +696,9 @@ rule pvacseq_cleanup:
     shell:
         """
         set -euo pipefail
+        SECONDS=0
         OUTDIR="{params.outdir}"
-        echo "[INFO] Cleanup pvacseq outputs in $OUTDIR" | tee {log}
+        echo "[START] pvacseq_cleanup {wildcards.sample_group} $(date '+%F %T')" | tee {log}
 
         CLEANUP="{params.cleanup_flag}"
         if [ "$CLEANUP" = "true" ] || [ "$CLEANUP" = "1" ]; then
@@ -644,5 +712,7 @@ rule pvacseq_cleanup:
         fi
 
         date > {output}
+        echo "[END] pvacseq_cleanup {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" | tee -a {log}
+       
         """
         
