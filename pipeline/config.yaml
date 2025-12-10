@@ -2,7 +2,7 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  Pt84:  # 替换primary，更易区分多样本
+  Pt8:  # 替换primary，更易区分多样本
     tumor: tumor
     normal: normal
 
