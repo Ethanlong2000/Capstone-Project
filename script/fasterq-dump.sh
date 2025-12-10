@@ -27,10 +27,10 @@ START_HOUR=$(date +%H -d "1:00")
 END_HOUR=$(date +%H -d "6:00")
 
 # 基于服务器配置（80核、755G内存）+ mamba-pigz优化资源参数
-MAX_THREADS=32  # 夜间用32核（总核数40%，避免抢占全部资源）
-DAY_THREADS=16  # 白天用16核（平衡其他任务）
+MAX_THREADS=16  # 夜间用32核（总核数40%，避免抢占全部资源）
+DAY_THREADS=12  # 白天用16核（平衡其他任务）
 MAX_MEM="128G"  # 夜间内存限制（总内存17%，避免OOM）
-DAY_MEM="64G"   # 白天内存限制
+DAY_MEM="128G"   # 白天内存限制
 COMPRESS_THREAD_RATIO=5  # 改为整数比例（代表1/2，即×5÷10），避免浮点数
 
 # 初始化目录
@@ -107,10 +107,11 @@ while read -r SRR; do
     [[ $COMPRESS_THREADS -lt 1 ]] && COMPRESS_THREADS=1
 
     # 第一步：尝试用fasterq-dump处理（优先，适配3.2.1版本）
+    # ←←← 关键修改！ 对 fasterq-dump 使用 --split-3，不是 --split-files
     if "$FASTERQ_DUMP" "$SRA_FILE" \
         -O "$FASTQ_DIR" \
         -t "$TMP_DIR" \
-        --split-files \
+        --split-3 \
         --threads "$THREADS" \
         --mem "$MEM_LIMIT" \
         --skip-technical; then

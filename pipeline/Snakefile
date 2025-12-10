@@ -78,9 +78,9 @@ rule fastp:
     shell:
         """
         set -euo pipefail
-        SECONDS=0
-        echo "[START] fastp {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" >> {log}
         mkdir -p $(dirname {log}) qc/fastp trimmed
+        SECONDS=0
+        echo "[START] fastp {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" | tee {log}
         fastp \
           -i {input.r1} -I {input.r2} \
           -o {output.r1} -O {output.r2} \
@@ -90,8 +90,8 @@ rule fastp:
           --thread {threads} \
           --json {output.json} \
           --html {output.html} \
-          > {log} 2>&1
-        echo "[END] fastp {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+          2>&1 | tee -a {log}
+        echo "[END] fastp {wildcards.sample_group}/{wildcards.sample} duration=$SECONDS s $(date '+%F %T')" | tee -a {log}
         """
 
 # 1. 质控：FastQC
@@ -107,17 +107,20 @@ rule fastqc:
     shell:
         """
         set -euo pipefail
-        SECONDS=0
-        echo "[START] fastqc {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" >> {log}
         mkdir -p $(dirname {log}) qc/fastqc/
-        fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee {log}
-        echo "[END] fastqc {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        SECONDS=0
+        echo "[START] fastqc {wildcards.sample_group}/{wildcards.sample} $(date '+%F %T')" | tee {log}
+        fastqc -t {threads} {input.r1} {input.r2} -o qc/fastqc/ 2>&1 | tee -a {log}
+        echo "[END] fastqc {wildcards.sample_group}/{wildcards.sample} duration=$SECONDS s $(date '+%F %T')" | tee -a {log}
         """
 
 # 2. 比对 + 添加 Read Group + 标记重复（优化临时文件名、日志、内存配置）rule align_and_dedup:
+rule align_and_dedup:
     input:
         r1 = "trimmed/{sample_group}_{sample}_1.fastq.gz",
         r2 = "trimmed/{sample_group}_{sample}_2.fastq.gz",
+        html1 = "qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
+        html2 = "qc/fastqc/{sample_group}_{sample}_2_fastqc.html"
     output:
         bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",
         bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
@@ -172,10 +175,8 @@ rule fastqc:
 
         echo "=== 完成：BAM文件路径 = {output.bam} ==="
         samtools view -H {output.bam} | grep '@RG' || echo "WARNING: RG信息未找到！"
-        echo "[END] align_and_dedup {wildcards.sample_group}/{wildcards.sample} duration=${SECONDS}s $(date '+%F %T')"
+        echo "[END] align_and_dedup {wildcards.sample_group}/{wildcards.sample} duration=$SECONDS s $(date '+%F %T')"
         """
-
-
 
 #3 HLA分型
 rule hla_typing:
@@ -223,7 +224,7 @@ rule hla_typing:
           --enumerate 2
 
         conda deactivate
-        echo "[END] hla_typing {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        echo "[END] hla_typing {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')"
         
         """
 
@@ -233,7 +234,8 @@ rule mutect2_scatter:
         tumor = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['tumor']}.sorted.dedup.rg.bam",
         normal = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['normal']}.sorted.dedup.rg.bam"
     output:
-        "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz"
+        vcf = "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
+        f1r2 = "vcf/{sample_group}/mutect2/{interval_name}.f1r2.tar.gz"
     params:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
@@ -261,20 +263,21 @@ rule mutect2_scatter:
             --germline-resource {params.germline} \
             --panel-of-normals {params.pon} \
             -L {params.interval_path} \
-            -O {output} \
+            -O {output.vcf} \
+            --f1r2-tar-gz {output.f1r2} \
             --native-pair-hmm-threads {threads} >> {log} 2>&1
 
         echo "=== 建立VCF索引（强制覆盖） ===" >> {log} 2>&1
         # 强制覆盖索引，失败时记录但不中断整个rule
-        if ! bcftools index -t -f {output} >> {log} 2>&1; then
-          echo "[WARN] bcftools index failed for {output}, trying tabix -f ..." >> {log} 2>&1
-          if ! tabix -f -p vcf {output} >> {log} 2>&1; then
+        if ! bcftools index -t -f {output.vcf} >> {log} 2>&1; then
+          echo "[WARN] bcftools index failed for {output.vcf}, trying tabix -f ..." >> {log} 2>&1
+          if ! tabix -f -p vcf {output.vcf} >> {log} 2>&1; then
             echo "[WARN] tabix indexing also failed, proceeding without index" >> {log} 2>&1
           fi
         fi
 
-        echo "=== 完成：VCF文件路径 = {output} ===" >> {log} 2>&1
-        echo "[END] mutect2_scatter {wildcards.sample_group} {wildcards.interval_name} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        echo "=== 完成：VCF文件路径 = {output.vcf} ===" >> {log} 2>&1
+        echo "[END] mutect2_scatter {wildcards.sample_group} {wildcards.interval_name} duration=$SECONDS s $(date '+%F %T')" >> {log}
         
         """
 
@@ -322,9 +325,135 @@ rule mutect2_gather:
 
         echo "=== 完成：合并后VCF路径 = {output} ===" >> {log} 2>&1
         du -sh {output} {output}.tbi >> {log} 2>&1 || true
-        echo "[END] mutect2_gather {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        echo "[END] mutect2_gather {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')" >> {log}
         
         """
+
+# 5.1 F1R2 合并学习方向性伪变异模型
+rule learn_read_orientation_model:
+    input:
+        lambda wc: expand(
+            "vcf/{sample_group}/mutect2/{interval_name}.f1r2.tar.gz",
+            sample_group=wc.sample_group,
+            interval_name=get_interval_names(wc)
+        )
+    output:
+        "qc/{sample_group}/mutect2/read-orientation-model.tar.gz"
+    params:
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
+    log: "logs/{sample_group}/learn_read_orientation_model.log"
+    resources:
+        io = 2
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        mkdir -p qc/{wildcards.sample_group}/mutect2 $(dirname {log})
+        echo "[START] learn_read_orientation_model {wildcards.sample_group} $(date '%F %T')" >> {log}
+
+        INPUT_ARGS=$(printf " -I %s" {input})
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" LearnReadOrientationModel \
+            $INPUT_ARGS \
+            -O {output} >> {log} 2>&1
+
+        echo "[END] learn_read_orientation_model {wildcards.sample_group} duration=$SECONDS s $(date '%F %T')" >> {log}
+        """
+
+# 5.2 生成肿瘤/正常的 pileup 摘要
+rule get_pileup_summaries:
+    input:
+        bam = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam",
+        bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
+    output:
+        "qc/{sample_group}/mutect2/{sample}.pileups.table"
+    params:
+        germline = config["germline_resource"],
+        intervals = config["genome_intervals"],
+        mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
+    threads: 4
+    resources:
+        io = 2
+    log: "logs/{sample_group}/get_pileup_summaries.{sample}.log"
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        mkdir -p qc/{wildcards.sample_group}/mutect2 $(dirname {log})
+        echo "[START] get_pileup_summaries {wildcards.sample_group}/{wildcards.sample} $(date '%F %T')" >> {log}
+        INTERVAL_ARGS=$(printf " -L %s" {params.intervals})
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" GetPileupSummaries \
+            -I {input.bam} \
+            -V {params.germline} \
+            $INTERVAL_ARGS \
+            -O {output} \
+            --sequence-dictionary {params.germline}.dict \
+            --tmp-dir tmp/{wildcards.sample_group}/{wildcards.sample}_pileup_tmp >> {log} 2>&1
+        echo "[END] get_pileup_summaries {wildcards.sample_group}/{wildcards.sample} duration=$SECONDS s $(date '%F %T')" >> {log}
+        """
+
+# 5.3 计算污染
+rule calculate_contamination:
+    input:
+        tumor = "qc/{sample_group}/mutect2/tumor.pileups.table",
+        normal = "qc/{sample_group}/mutect2/normal.pileups.table"
+    output:
+        contamination = "qc/{sample_group}/mutect2/contamination.table",
+        segments = "qc/{sample_group}/mutect2/segments.table"
+    params:
+        mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
+    log: "logs/{sample_group}/calculate_contamination.log"
+    resources:
+        io = 2
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        mkdir -p qc/{wildcards.sample_group}/mutect2 $(dirname {log})
+        echo "[START] calculate_contamination {wildcards.sample_group} $(date '%F %T')" >> {log}
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" CalculateContamination \
+            -I {input.tumor} \
+            -matched {input.normal} \
+            -O {output.contamination} \
+            --tumor-segmentation {output.segments} >> {log} 2>&1
+        echo "[END] calculate_contamination {wildcards.sample_group} duration=$SECONDS s $(date '%F %T')" >> {log}
+        """
+
+# 5.4 Mutect2 结果过滤
+rule filter_mutect_calls:
+    input:
+        vcf = "vcf/{sample_group}/somatic.vcf.gz",
+        contamination = "qc/{sample_group}/mutect2/contamination.table",
+        segments = "qc/{sample_group}/mutect2/segments.table",
+        ob_priors = "qc/{sample_group}/mutect2/read-orientation-model.tar.gz"
+    output:
+        vcf = "vcf/{sample_group}/somatic.filtered.vcf.gz"
+    params:
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
+    log: "logs/{sample_group}/filter_mutect_calls.log"
+    resources:
+        io = 2
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
+        echo "[START] filter_mutect_calls {wildcards.sample_group} $(date '%F %T')" >> {log}
+
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" FilterMutectCalls \
+            -V {input.vcf} \
+            --contamination-table {input.contamination} \
+            --tumor-segmentation {input.segments} \
+            --ob-priors {input.ob_priors} \
+            -O {output.vcf} >> {log} 2>&1
+
+        if ! bcftools index -t -f {output.vcf}; then
+          echo "[WARN] bcftools index failed, trying tabix -f ..." >> {log} 2>&1
+          tabix -f -p vcf {output.vcf} >> {log} 2>&1 || true
+        fi
+        echo "[END] filter_mutect_calls {wildcards.sample_group} duration=$SECONDS s $(date '%F %T')" >> {log}
+        """
+
+
 
 # 解析与格式化 HLA 列表
 def parse_optitype_tsv(tsv_path):
@@ -406,7 +535,7 @@ rule hla_format:
 # 7. VEP注释
 rule vep_annotate:
     input:
-        vcf = "vcf/{sample_group}/somatic.vcf.gz"
+        vcf = "vcf/{sample_group}/somatic.filtered.vcf.gz"
     output:
         vcf = "vcf/{sample_group}/somatic.vep.vcf.gz",
         tbi = "vcf/{sample_group}/somatic.vep.vcf.gz.tbi"
@@ -513,12 +642,12 @@ rule vep_annotate:
         set +u
         conda deactivate || true
         set -u
-        echo "[END] vep_annotate {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        echo "[END] vep_annotate {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')"
         
         """
 
 
-# 8a. 新抗原预测（运行 pvacseq，不检查具体输出文件名）
+# 8. 新抗原预测（运行 pvacseq，不检查具体输出文件名）
 rule pvacseq_run:
     input:
         vcf = "vcf/{sample_group}/somatic.vep.vcf.gz",
@@ -613,7 +742,7 @@ rule pvacseq_run:
         set +u
         conda deactivate || true
         set -u
-        echo "[END] pvacseq_run {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')"
+        echo "[END] pvacseq_run {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')"
         
         """
 
@@ -676,7 +805,7 @@ rule extract_neoantigen_features:
             echo "ERROR: Output file is empty!" >&2
             exit 1
         fi
-        echo "[END] extract_neoantigen_features {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" >> {log}
+        echo "[END] extract_neoantigen_features {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')" >> {log}
         
         """
 
@@ -712,7 +841,7 @@ rule pvacseq_cleanup:
         fi
 
         date > {output}
-        echo "[END] pvacseq_cleanup {wildcards.sample_group} duration=${SECONDS}s $(date '+%F %T')" | tee -a {log}
+        echo "[END] pvacseq_cleanup {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')" | tee -a {log}
        
         """
         

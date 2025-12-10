@@ -1,6 +1,7 @@
 raw/
 fastq/
 tmp/
+qc/
 processed/
 # 原始测序数据
 *.fastq
