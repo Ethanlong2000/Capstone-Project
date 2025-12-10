@@ -56,3 +56,5 @@ while read -r SRR; do
         echo "下载失败: $SRR"
     fi
 done < "$SRR_LIST"
+
+# prefetch -f no -p --option-file  /work/longyh/BY/processed/SRR_list.txt  --max-size 200G
