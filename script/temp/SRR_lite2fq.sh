@@ -1,28 +1,26 @@
 #!/bin/bash
+set -eo pipefail
 
 # ========== 配置 ==========
-RAW_DIR="/work/longyh/BY/raw"
+RAW_DIR="/work/longyh/BY/raw"          # .sralite.1 文件所在目录
 FASTQ_OUT_DIR="/work/longyh/BY/fastq/WES"
+LOG_DIR="/work/longyh/BY/processed/logs/fasterq"
+THREADS_PER_JOB=16
+TEMP_DIR="/dev/shm/sra_tmp"
 
-# 优化后的资源配置（双端WES适配）
-MAX_JOBS=8              # 保持原配置，匹配/dev/shm容量
-THREADS_PER_JOB=16      # 保持原线程数，WES数据量大，单任务多线程更高效
-TEMP_DIR="/dev/shm/sra_tmp"  # 统一临时目录
+# ========== 初始化 ==========
+mkdir -p "$FASTQ_OUT_DIR" "$TEMP_DIR" "$LOG_DIR"
 
-# ========== 依赖检查 ==========
-for tool in pigz fasterq-dump parallel; do
-    if ! command -v "$tool" &> /dev/null; then
-        echo "[ERROR] '$tool' not found." >&2
-        exit 1
-    fi
-done
+# 依赖检查（确认版本）
+if ! command -v fasterq-dump &> /dev/null; then
+    echo "[ERROR] fasterq-dump not found" >&2
+    exit 1
+fi
+FASTQ_DUMP_VER=$(fasterq-dump --version | head -1 | awk '{print $2}')
+echo "[INFO] Using fasterq-dump version: $FASTQ_DUMP_VER"
 
-mkdir -p "$FASTQ_OUT_DIR"
-mkdir -p "$TEMP_DIR"
-
-# 获取样本：精准匹配 .sralite.1 后缀的文件
+# 获取所有 .sralite.1 文件
 shopt -s nullglob
-# 只匹配 *.sralite.1 的文件，符合你的真实文件名格式
 sra_files=( "$RAW_DIR"/*.sralite.1 )
 shopt -u nullglob
 
@@ -31,86 +29,118 @@ if (( ${#sra_files[@]} == 0 )); then
     exit 0
 fi
 
-echo "[INFO] Found ${#sra_files[@]} paired-end SRA files (WES data)."
-echo "[INFO] Using /dev/shm for temp files (max $MAX_JOBS concurrent, $THREADS_PER_JOB threads each)."
-echo "[INFO] Total threads: $((MAX_JOBS * THREADS_PER_JOB)) / 160"
+echo "[INFO] Found ${#sra_files[@]} SRA lite files to process"
 
-# ========== 处理函数 ==========
+# ========== 处理函数（适配 3.2.1 版本） ==========
 process_sra() {
-    local sra="$1"
+    local sra_lite_file="$1"  # 直接传入 .sralite.1 文件完整路径
     local out_dir="$2"
     local threads="$3"
     
-    # 关键修复：正确提取样本名（去掉 .sralite.1 后缀）
-    # 例如：SRR5134828.sralite.1 → SRR5134828
-    local base=$(basename "$sra" .sralite.1)
+    # 提取样本名（去掉 .sralite.1 后缀）
+    local base=$(basename "$sra_lite_file" .sralite.1)
     local R1="$out_dir/${base}_1.fastq.gz"
     local R2="$out_dir/${base}_2.fastq.gz"
-    local tmpdir="$TEMP_DIR/$base"
+    local tmpdir="$TEMP_DIR/${base}_$$"
+    local log_file="$LOG_DIR/${base}.log"
 
-    # 跳过已完成的双端样本（必须同时存在R1和R2）
-    if [[ -f "$R1" && -f "$R2" ]]; then
-        echo "[SKIP] $base (already completed)"
-        rm -rf "$tmpdir"  # 清理残留临时文件
+    # 清空旧日志
+    > "$log_file"
+    echo "========== [$(date)] START $base ==========" >> "$log_file"
+
+    # 跳过已完成的样本（检查文件存在且非空）
+    if [[ -f "$R1" && -f "$R2" && -s "$R1" && -s "$R2" ]]; then
+        echo "[SKIP] $base (already completed)" >> "$log_file"
+        cat "$log_file"
         return 0
     fi
 
-    # 创建样本专属临时目录
+    # 创建临时目录
     mkdir -p "$tmpdir" || {
-        echo "[ERROR] Failed to create temp dir $tmpdir for $base" >&2
+        echo "[ERROR] Failed to create temp dir $tmpdir" >> "$log_file"
+        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
+        cat "$log_file"
         return 1
     }
 
-    echo "[START] Processing $base (source: $sra)"
+    echo "[START] Processing $base (file: $sra_lite_file)" >> "$log_file"
 
-    # 执行fasterq-dump：保留日志便于排查，双端数据无需调整split参数
-    if ! fasterq-dump \
+    # 核心修正：适配 fasterq-dump 3.2.1 版本的参数
+    # 移除 --resume/--lite/--dir，直接传入 .sralite.1 文件路径
+    fasterq-dump \
         --split-3 \
         --skip-technical \
         --threads "$threads" \
         --outdir "$tmpdir" \
         --temp "$tmpdir" \
         --progress \
-        --resume \  # 断点续传，避免重复耗时
-        "$sra"; then
-        echo "[ERROR] fasterq-dump failed for $base (check logs above)" >&2
+        "$sra_lite_file" >> "$log_file" 2>&1
+
+    # 检查 fasterq-dump 执行状态
+    if [[ $? -ne 0 ]]; then
+        echo "[ERROR] fasterq-dump failed for $base (exit code: $?)" >> "$log_file"
         rm -rf "$tmpdir"
+        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
+        cat "$log_file"
         return 1
     fi
 
-    # 验证双端文件是否生成（WES双端必存在）
-    if [[ ! -f "$tmpdir/${base}_1.fastq" || ! -f "$tmpdir/${base}_2.fastq" ]]; then
-        echo "[ERROR] Paired-end files missing for $base (R1/R2 not found)" >&2
+    # 检查生成的 fastq 文件
+    local tmp_R1="$tmpdir/${base}_1.fastq"
+    local tmp_R2="$tmpdir/${base}_2.fastq"
+    if [[ ! -f "$tmp_R1" || ! -f "$tmp_R2" ]]; then
+        echo "[ERROR] Paired files missing: $tmp_R1 or $tmp_R2" >> "$log_file"
+        # 列出临时目录内容，方便排查
+        ls -l "$tmpdir/" >> "$log_file"
         rm -rf "$tmpdir"
+        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
+        cat "$log_file"
         return 1
     fi
 
-    # 压缩双端文件（并行压缩，提升效率）
-    echo "[INFO] Compressing $base R1/R2..."
-    pigz -p "$threads" -c "$tmpdir/${base}_1.fastq" > "$R1" &
-    pigz -p "$threads" -c "$tmpdir/${base}_2.fastq" > "$R2" &
-    wait  # 等待双端压缩完成
+    # 压缩为 gz 格式（并行压缩）
+    echo "[INFO] Compressing $base R1/R2..." >> "$log_file"
+    pigz -p "$threads" -c "$tmp_R1" > "$R1"
+    pigz -p "$threads" -c "$tmp_R2" > "$R2"
 
-    # 检查压缩结果
-    if [[ ! -f "$R1" || ! -f "$R2" ]]; then
-        echo "[ERROR] Compression failed for $base (R1/R2 missing)" >&2
+    # 验证压缩结果
+    if [[ ! -s "$R1" || ! -s "$R2" ]]; then
+        echo "[ERROR] Compression failed (empty output files)" >> "$log_file"
+        rm -f "$R1" "$R2"
         rm -rf "$tmpdir"
+        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
+        cat "$log_file"
         return 1
     fi
 
     # 清理临时文件
     rm -rf "$tmpdir"
-    echo "[DONE] Processed $base successfully"
+    echo "[DONE] $base processed successfully" >> "$log_file"
+    echo "========== [$(date)] SUCCESS $base ==========" >> "$log_file"
+    cat "$log_file"
+    return 0
 }
 
-export -f process_sra
-export FASTQ_OUT_DIR TEMP_DIR
+# ========== 主循环 ==========
+total=${#sra_files[@]}
+i=1
+for sra in "${sra_files[@]}"; do
+    base=$(basename "$sra" .sralite.1)
+    echo -e "\n[$i/$total] Starting $base ..."
+    echo "Log: $LOG_DIR/${base}.log"
 
-# 并行执行：增加失败重试，适配WES大数据量
-parallel --bar -j "$MAX_JOBS" --retries 1 process_sra {} "$FASTQ_OUT_DIR" "$THREADS_PER_JOB" ::: "${sra_files[@]}"
+    # 调用处理函数
+    if process_sra "$sra" "$FASTQ_OUT_DIR" "$THREADS_PER_JOB"; then
+        echo "[$i/$total] [SUCCESS] $base"
+    else
+        echo "[$i/$total] [FAILURE] $base (check log: $log_file)"
+    fi
+    ((i++))
+done
 
-# 清理临时目录
-rm -rf "$TEMP_DIR"
+# 清理空临时目录
+find "$TEMP_DIR" -type d -empty -delete
 
-echo
-echo "[SUCCESS] All WES samples processed! Output: $FASTQ_OUT_DIR"
+echo -e "\n[SUMMARY] All samples processed."
+echo "[OUTPUT] Fastq files: $FASTQ_OUT_DIR"
+echo "[LOGS] Log files: $LOG_DIR"
