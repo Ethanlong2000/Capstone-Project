@@ -2,7 +2,8 @@
 
 # 配置路径
 FASTQ_DIR="/work/longyh/BY/fastq/WES"
-INVALID_LIST="/work/longyh/BY/processed/validation_results/invalid_samples.txt"
+# INVALID_LIST="/work/longyh/BY/processed/validation_results/invalid_samples.txt"
+# INVALID_LIST="/work/longyh/BY/processed/SRR_list.txt"
 LOG="/work/longyh/BY/processed/validation_results/remove_invalid.log"
 
 # 日志函数
