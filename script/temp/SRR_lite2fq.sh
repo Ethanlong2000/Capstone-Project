@@ -5,7 +5,7 @@ set -eo pipefail
 RAW_DIR="/work/longyh/BY/raw"          # .sralite.1 文件所在目录
 FASTQ_OUT_DIR="/work/longyh/BY/fastq/WES"
 LOG_DIR="/work/longyh/BY/processed/logs/fasterq"
-THREADS_PER_JOB=16
+THREADS_PER_JOB=48
 TEMP_DIR="/dev/shm/sra_tmp"
 
 # ========== 初始化 ==========
@@ -70,6 +70,7 @@ process_sra() {
     fasterq-dump \
         --split-3 \
         --skip-technical \
+        --mem 80000M \
         --threads "$threads" \
         --outdir "$tmpdir" \
         --temp "$tmpdir" \
