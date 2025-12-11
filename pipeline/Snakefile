@@ -7,10 +7,10 @@ OPTITYPE_ENV = "/home/longyh/miniforge3/envs/optitype"  # OptiType 环境路径
 # 全局参数校验
 import os, glob, re
 assert os.path.exists(config["ref_genome"]), f"Ref genome {config['ref_genome']} not found!"
+assert os.path.exists(config.get("ref_dict", config["ref_genome"] + ".dict")), "Reference dictionary (.dict) not found; generate with gatk CreateSequenceDictionary"
 assert os.path.exists(config["germline_resource"]), "Germline resource not found!"
 assert os.path.exists(config["panel_of_normals"]), "PON not found!"
 assert "epitope_lengths" in config["pvacseq"], "请在config.yaml的pvacseq下配置epitope_lengths（如8,9,10,11）"
-assert "netmhc_dir" in config, "请在config.yaml中配置netmhc_dir路径"
 assert "genome_intervals" in config, "请在config.yaml中配置genome_intervals（手动指定区间文件列表）"
 assert "vep" in config, "请在config.yaml中添加vep配置块"
 assert "cache_dir" in config["vep"], "请在config.yaml的vep下配置cache_dir (VEP缓存目录)"
@@ -235,7 +235,8 @@ rule mutect2_scatter:
         normal = lambda wildcards: f"bam/{wildcards.sample_group}/{config['samples'][wildcards.sample_group]['normal']}.sorted.dedup.rg.bam"
     output:
         vcf = "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
-        f1r2 = "vcf/{sample_group}/mutect2/{interval_name}.f1r2.tar.gz"
+        f1r2 = "vcf/{sample_group}/mutect2/{interval_name}.f1r2.tar.gz",
+        stats = "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz.stats"
     params:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
@@ -264,6 +265,7 @@ rule mutect2_scatter:
             --panel-of-normals {params.pon} \
             -L {params.interval_path} \
             -O {output.vcf} \
+            --stats {output.stats} \
             --f1r2-tar-gz {output.f1r2} \
             --native-pair-hmm-threads {threads} >> {log} 2>&1
 
@@ -328,6 +330,36 @@ rule mutect2_gather:
         echo "[END] mutect2_gather {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')" >> {log}
         
         """
+# 5.0.1 合并 Mutect2 统计
+rule mutect2_merge_stats:
+    input:
+        lambda wc: expand(
+            "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz.stats",
+            sample_group=wc.sample_group,
+            interval_name=get_interval_names(wc)
+        )
+    output:
+        "vcf/{sample_group}/somatic.vcf.gz.stats"
+    params:
+        mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
+    log: "logs/{sample_group}/mutect2_merge_stats.log"
+    resources:
+        io = 1
+    shell:
+        """
+        set -euo pipefail
+        SECONDS=0
+        mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
+        echo "[START] mutect2_merge_stats {wildcards.sample_group} $(date '+%F %T')" >> {log}
+
+        INPUT_ARGS=$(printf " --stats %s" {input})
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" MergeMutectStats \
+            $INPUT_ARGS \
+            -O {output} >> {log} 2>&1
+
+        echo "[END] mutect2_merge_stats {wildcards.sample_group} duration=$SECONDS s $(date '+%F %T')" >> {log}
+        """
+
 
 # 5.1 F1R2 合并学习方向性伪变异模型
 rule learn_read_orientation_model:
@@ -340,7 +372,8 @@ rule learn_read_orientation_model:
     output:
         "qc/{sample_group}/mutect2/read-orientation-model.tar.gz"
     params:
-        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G"),
+        ref = config["ref_genome"]
     log: "logs/{sample_group}/learn_read_orientation_model.log"
     resources:
         io = 2
@@ -352,7 +385,7 @@ rule learn_read_orientation_model:
         echo "[START] learn_read_orientation_model {wildcards.sample_group} $(date '%F %T')" >> {log}
 
         INPUT_ARGS=$(printf " -I %s" {input})
-        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" LearnReadOrientationModel \
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" LearnReadOrientationModel \
             $INPUT_ARGS \
             -O {output} >> {log} 2>&1
 
@@ -369,7 +402,8 @@ rule get_pileup_summaries:
     params:
         germline = config["germline_resource"],
         intervals = config["genome_intervals"],
-        mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
+        mutect2_mem = config.get("mem", {}).get("mutect2", "16G"),
+        ref_dict = config.get("ref_dict", config["ref_genome"] + ".dict")
     threads: 4
     resources:
         io = 2
@@ -379,15 +413,18 @@ rule get_pileup_summaries:
         set -euo pipefail
         SECONDS=0
         mkdir -p qc/{wildcards.sample_group}/mutect2 $(dirname {log})
+        TMP_DIR=tmp/{wildcards.sample_group}/{wildcards.sample}_pileup_tmp
+        mkdir -p "$TMP_DIR"
+        chmod 770 "$TMP_DIR" || true
         echo "[START] get_pileup_summaries {wildcards.sample_group}/{wildcards.sample} $(date '%F %T')" >> {log}
         INTERVAL_ARGS=$(printf " -L %s" {params.intervals})
-        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" GetPileupSummaries \
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" GetPileupSummaries \
             -I {input.bam} \
             -V {params.germline} \
             $INTERVAL_ARGS \
             -O {output} \
-            --sequence-dictionary {params.germline}.dict \
-            --tmp-dir tmp/{wildcards.sample_group}/{wildcards.sample}_pileup_tmp >> {log} 2>&1
+            --sequence-dictionary {params.ref_dict} \
+            --tmp-dir "$TMP_DIR" >> {log} 2>&1
         echo "[END] get_pileup_summaries {wildcards.sample_group}/{wildcards.sample} duration=$SECONDS s $(date '%F %T')" >> {log}
         """
 
@@ -410,7 +447,7 @@ rule calculate_contamination:
         SECONDS=0
         mkdir -p qc/{wildcards.sample_group}/mutect2 $(dirname {log})
         echo "[START] calculate_contamination {wildcards.sample_group} $(date '%F %T')" >> {log}
-        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" CalculateContamination \
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" CalculateContamination \
             -I {input.tumor} \
             -matched {input.normal} \
             -O {output.contamination} \
@@ -422,13 +459,15 @@ rule calculate_contamination:
 rule filter_mutect_calls:
     input:
         vcf = "vcf/{sample_group}/somatic.vcf.gz",
+        stats = "vcf/{sample_group}/somatic.vcf.gz.stats",
         contamination = "qc/{sample_group}/mutect2/contamination.table",
         segments = "qc/{sample_group}/mutect2/segments.table",
         ob_priors = "qc/{sample_group}/mutect2/read-orientation-model.tar.gz"
     output:
         vcf = "vcf/{sample_group}/somatic.filtered.vcf.gz"
     params:
-        mutect2_mem = config.get("mem", {}).get("mutect2", "32G")
+        mutect2_mem = config.get("mem", {}).get("mutect2", "32G"),
+        ref = config["ref_genome"]
     log: "logs/{sample_group}/filter_mutect_calls.log"
     resources:
         io = 2
@@ -439,8 +478,10 @@ rule filter_mutect_calls:
         mkdir -p vcf/{wildcards.sample_group}/ $(dirname {log})
         echo "[START] filter_mutect_calls {wildcards.sample_group} $(date '%F %T')" >> {log}
 
-        gatk --java-options "-Xmx{params.mutect2_mem} -XX:UseParallelGC" FilterMutectCalls \
+        gatk --java-options "-Xmx{params.mutect2_mem} -XX:+UseParallelGC" FilterMutectCalls \
+            -R {params.ref} \
             -V {input.vcf} \
+            --stats {input.stats} \
             --contamination-table {input.contamination} \
             --tumor-segmentation {input.segments} \
             --ob-priors {input.ob_priors} \
@@ -506,6 +547,7 @@ def parse_optitype_tsv(tsv_path):
     except Exception:
         return []
 
+
 # 6. HLA结果格式化
 rule hla_format:
     input:
@@ -530,6 +572,7 @@ rule hla_format:
             out.write(','.join(alleles) + '\n')
         with open(str(log), 'a') as lg:
             lg.write(f"[END] hla_format {wildcards.sample_group} duration={(datetime.datetime.now()-t0).total_seconds():.1f}s {datetime.datetime.now():%F %T}\n")
+
 
 
 # 7. VEP注释
@@ -717,6 +760,9 @@ rule pvacseq_run:
         OUTDIR="{params.outdir}"
         mkdir -p "$OUTDIR"
 
+        # ##清理旧的重启状态，防止参数变动触发 Abort（但是中断后只能重新运行）
+        # rm -f "$OUTDIR"/*.restart.json "$OUTDIR"/MHC_Class_I/*.restart.json 2>/dev/null || true
+
         pvacseq run \
             {input.vcf} \
             {params.tumor_id} \
@@ -726,7 +772,6 @@ rule pvacseq_run:
             -e1 {params.epitope_lengths} \
             --iedb-install-directory {params.netmhc_dir} \
             --n-threads {threads} \
-            --net-chop-method cterm \
             --netmhc-stab \
             --pass-only
 
