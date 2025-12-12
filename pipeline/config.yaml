@@ -2,9 +2,9 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  Pt8:  # 替换primary，更易区分多样本
-    tumor: tumor
-    normal: normal
+  # Pt8:  # 替换primary，更易区分多样本
+  #   tumor: tumor
+  #   normal: normal
 
 # ===================== 资源配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
@@ -16,6 +16,23 @@ threads:
   vep: 8             # VEP注释线程
   pvacseq_run: 24        # pVACseq新抗原预测线程
   fastp: 8           # fastp质控线程
+
+# 可配置的 I/O 资源权重（用于 Snakemake resources.io 调度）
+resources:
+  io:
+    fastp: 4
+    fastqc: 3
+    align_and_dedup: 4
+    hla_typing: 2
+    mutect2_scatter: 3
+    mutect2_gather: 2
+    mutect2_merge_stats: 1
+    learn_read_orientation_model: 2
+    get_pileup_summaries: 2
+    calculate_contamination: 2
+    filter_mutect_calls: 2
+    vep_annotate: 2
+    pvacseq_run: 2
 
 mem:
   vep: 32G           # VEP内存分配

@@ -73,7 +73,7 @@ rule fastp:
         html = "qc/fastp/{sample_group}_{sample}.html"
     threads: config.get("threads", {}).get("fastp", 8)
     resources:
-        io = 4
+        io = config.get("resources", {}).get("io", {}).get("fastp", 4)
     log: "logs/{sample_group}/fastp/{sample}.log"
     shell:
         """
@@ -103,6 +103,8 @@ rule fastqc:
         html1 = "qc/fastqc/{sample_group}_{sample}_1_fastqc.html",
         html2 = "qc/fastqc/{sample_group}_{sample}_2_fastqc.html"
     threads: config["threads"]["fastqc"]
+    resources:
+        io = config.get("resources", {}).get("io", {}).get("fastqc", 3)
     log: "logs/{sample_group}/fastqc/{sample}.log"
     shell:
         """
@@ -126,7 +128,7 @@ rule align_and_dedup:
         bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
     threads: config["threads"]["align"]
     resources:
-        io = 4
+        io = config.get("resources", {}).get("io", {}).get("align_and_dedup", 4)
     params:
         ref = config["ref_genome"],
         tmp_dir = "tmp/{sample_group}/{sample}",
@@ -192,7 +194,7 @@ rule hla_typing:
         optitype_env = OPTITYPE_ENV
     threads: 1
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("hla_typing", 2)
     log: "logs/{sample_group}/hla_typing.log"
     shell:
         """
@@ -247,7 +249,7 @@ rule mutect2_scatter:
         normal_id = lambda wc: f"{wc.sample_group}_normal"  # 新增
     threads: config["threads"]["mutect2"]
     resources:
-        io = 3
+        io = config.get("resources", {}).get("io", {}).get("mutect2_scatter", 3)
     log: "logs/{sample_group}/mutect2/{interval_name}.log"
     shell:
         """
@@ -303,7 +305,7 @@ rule mutect2_gather:
         ref = config["ref_genome"]
     log: "logs/{sample_group}/mutect2_gather.log"
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("mutect2_gather", 2)
     shell:
         """
         set -euo pipefail
@@ -344,7 +346,7 @@ rule mutect2_merge_stats:
         mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
     log: "logs/{sample_group}/mutect2_merge_stats.log"
     resources:
-        io = 1
+        io = config.get("resources", {}).get("io", {}).get("mutect2_merge_stats", 1)
     shell:
         """
         set -euo pipefail
@@ -376,7 +378,7 @@ rule learn_read_orientation_model:
         ref = config["ref_genome"]
     log: "logs/{sample_group}/learn_read_orientation_model.log"
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("learn_read_orientation_model", 2)
     shell:
         """
         set -euo pipefail
@@ -406,7 +408,7 @@ rule get_pileup_summaries:
         ref_dict = config.get("ref_dict", config["ref_genome"] + ".dict")
     threads: 4
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("get_pileup_summaries", 2)
     log: "logs/{sample_group}/get_pileup_summaries.{sample}.log"
     shell:
         """
@@ -440,7 +442,7 @@ rule calculate_contamination:
         mutect2_mem = config.get("mem", {}).get("mutect2", "16G")
     log: "logs/{sample_group}/calculate_contamination.log"
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("calculate_contamination", 2)
     shell:
         """
         set -euo pipefail
@@ -470,7 +472,7 @@ rule filter_mutect_calls:
         ref = config["ref_genome"]
     log: "logs/{sample_group}/filter_mutect_calls.log"
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("filter_mutect_calls", 2)
     shell:
         """
         set -euo pipefail
@@ -591,7 +593,7 @@ rule vep_annotate:
         vep_mem = config.get("mem", {}).get("vep", "32G")
     threads: config.get("threads", {}).get("vep", 8)
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("vep_annotate", 2)
     log: "logs/{sample_group}/vep_annotate.log"
     shell:
         """
@@ -708,7 +710,7 @@ rule pvacseq_run:
         outdir = lambda wc: f"results/{wc.sample_group}/pvacseq_vep"
     threads: config["threads"]["pvacseq_run"]
     resources:
-        io = 2
+        io = config.get("resources", {}).get("io", {}).get("pvacseq_run", 2)
     log: "logs/{sample_group}/pvacseq_run.log"
     shell:
         """
