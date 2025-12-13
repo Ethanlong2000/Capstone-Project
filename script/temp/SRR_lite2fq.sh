@@ -1,147 +1,72 @@
 #!/bin/bash
-set -eo pipefail
+set -euo pipefail
 
-# ========== 配置 ==========
-RAW_DIR="/work/longyh/BY/raw"          # .sralite.1 文件所在目录
-FASTQ_OUT_DIR="/work/longyh/BY/fastq/WES"
+# 配置参数
+SRR_LIST="/work/longyh/BY/processed/undownload_SRR_list.txt"
+RAW_DIR="/work/longyh/BY/raw"            # .sra 文件所在目录
+FASTQ_DIR="/work/longyh/BY/fastq/WES"
 LOG_DIR="/work/longyh/BY/processed/logs/fasterq"
-THREADS_PER_JOB=48
-TEMP_DIR="/dev/shm/sra_tmp"
+LOG_FILE="$LOG_DIR/parallel_fastq_$(date +%Y%m%d_%H%M%S).log"
 
-# ========== 初始化 ==========
-mkdir -p "$FASTQ_OUT_DIR" "$TEMP_DIR" "$LOG_DIR"
+THREADS=16          # 根据服务器资源调整
+TMP_DIR="/tmp/parallel_fastq_tmp_$(date +%s)_$$"
 
-# 依赖检查（确认版本）
-if ! command -v fasterq-dump &> /dev/null; then
-    echo "[ERROR] fasterq-dump not found" >&2
-    exit 1
-fi
-FASTQ_DUMP_VER=$(fasterq-dump --version | head -1 | awk '{print $2}')
-echo "[INFO] Using fasterq-dump version: $FASTQ_DUMP_VER"
+# 检查命令是否存在
+command -v parallel-fastq-dump >/dev/null || { echo "ERROR: parallel-fastq-dump not found" >&2; exit 1; }
 
-# 获取所有 .sralite.1 文件
-shopt -s nullglob
-sra_files=( "$RAW_DIR"/*.sralite.1 )
-shopt -u nullglob
+# 创建必要目录
+mkdir -p "$FASTQ_DIR" "$TMP_DIR" "$LOG_DIR"
 
-if (( ${#sra_files[@]} == 0 )); then
-    echo "[WARN] No .sralite.1 files found in $RAW_DIR"
-    exit 0
-fi
+# 日志同时输出到终端和文件
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "[INFO] Found ${#sra_files[@]} SRA lite files to process"
+# 打印开始信息
+echo "=== Conversion started at $(date) ==="
+echo "Using parallel-fastq-dump v$(parallel-fastq-dump -V 2>&1 | head -n1 | awk '{print $NF}')"
+echo "Log: $LOG_FILE"
+echo "Input dir: $RAW_DIR"
+echo "Output dir: $FASTQ_DIR"
+echo ""
 
-# ========== 处理函数（适配 3.2.1 版本） ==========
-process_sra() {
-    local sra_lite_file="$1"  # 直接传入 .sralite.1 文件完整路径
-    local out_dir="$2"
-    local threads="$3"
+# 切换到SRA文件目录（核心：让工具能找到.sra文件）
+cd "$RAW_DIR" || { echo "ERROR: Failed to enter $RAW_DIR" >&2; exit 1; }
+
+# 遍历SRR列表处理
+while IFS= read -r srr; do
+    # 跳过空行
+    [[ -z "$srr" ]] && continue
+
+    # 提取纯SRR编号（移除可能的.sra后缀）
+    srr_base=$(basename "$srr" .sra)
     
-    # 提取样本名（去掉 .sralite.1 后缀）
-    local base=$(basename "$sra_lite_file" .sralite.1)
-    local R1="$out_dir/${base}_1.fastq.gz"
-    local R2="$out_dir/${base}_2.fastq.gz"
-    local tmpdir="$TEMP_DIR/${base}_$$"
-    local log_file="$LOG_DIR/${base}.log"
-
-    # 清空旧日志
-    > "$log_file"
-    echo "========== [$(date)] START $base ==========" >> "$log_file"
-
-    # 跳过已完成的样本（检查文件存在且非空）
-    if [[ -f "$R1" && -f "$R2" && -s "$R1" && -s "$R2" ]]; then
-        echo "[SKIP] $base (already completed)" >> "$log_file"
-        cat "$log_file"
-        return 0
+    # 检查.sra文件是否存在（当前目录已切换到RAW_DIR）
+    if [[ ! -f "${srr_base}.sra" && ! -f "$srr_base" ]]; then
+        echo "ERROR: $RAW_DIR/${srr_base}.sra (or $srr_base) not found. Skipping."
+        continue
     fi
 
-    # 创建临时目录
-    mkdir -p "$tmpdir" || {
-        echo "[ERROR] Failed to create temp dir $tmpdir" >> "$log_file"
-        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
-        cat "$log_file"
-        return 1
-    }
+    echo "[$(date)] Processing: $srr_base"
 
-    echo "[START] Processing $base (file: $sra_lite_file)" >> "$log_file"
-
-    # 核心修正：适配 fasterq-dump 3.2.1 版本的参数
-    # 移除 --resume/--lite/--dir，直接传入 .sralite.1 文件路径
-    fasterq-dump \
-        --split-3 \
-        --skip-technical \
-        --mem 80000M \
-        --threads "$threads" \
-        --outdir "$tmpdir" \
-        --temp "$tmpdir" \
-        --progress \
-        "$sra_lite_file" >> "$log_file" 2>&1
-
-    # 检查 fasterq-dump 执行状态
-    if [[ $? -ne 0 ]]; then
-        echo "[ERROR] fasterq-dump failed for $base (exit code: $?)" >> "$log_file"
-        rm -rf "$tmpdir"
-        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
-        cat "$log_file"
-        return 1
-    fi
-
-    # 检查生成的 fastq 文件
-    local tmp_R1="$tmpdir/${base}_1.fastq"
-    local tmp_R2="$tmpdir/${base}_2.fastq"
-    if [[ ! -f "$tmp_R1" || ! -f "$tmp_R2" ]]; then
-        echo "[ERROR] Paired files missing: $tmp_R1 or $tmp_R2" >> "$log_file"
-        # 列出临时目录内容，方便排查
-        ls -l "$tmpdir/" >> "$log_file"
-        rm -rf "$tmpdir"
-        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
-        cat "$log_file"
-        return 1
-    fi
-
-    # 压缩为 gz 格式（并行压缩）
-    echo "[INFO] Compressing $base R1/R2..." >> "$log_file"
-    pigz -p "$threads" -c "$tmp_R1" > "$R1"
-    pigz -p "$threads" -c "$tmp_R2" > "$R2"
-
-    # 验证压缩结果
-    if [[ ! -s "$R1" || ! -s "$R2" ]]; then
-        echo "[ERROR] Compression failed (empty output files)" >> "$log_file"
-        rm -f "$R1" "$R2"
-        rm -rf "$tmpdir"
-        echo "========== [$(date)] FAILED $base ==========" >> "$log_file"
-        cat "$log_file"
-        return 1
-    fi
-
-    # 清理临时文件
-    rm -rf "$tmpdir"
-    echo "[DONE] $base processed successfully" >> "$log_file"
-    echo "========== [$(date)] SUCCESS $base ==========" >> "$log_file"
-    cat "$log_file"
-    return 0
-}
-
-# ========== 主循环 ==========
-total=${#sra_files[@]}
-i=1
-for sra in "${sra_files[@]}"; do
-    base=$(basename "$sra" .sralite.1)
-    echo -e "\n[$i/$total] Starting $base ..."
-    echo "Log: $LOG_DIR/${base}.log"
-
-    # 调用处理函数
-    if process_sra "$sra" "$FASTQ_OUT_DIR" "$THREADS_PER_JOB"; then
-        echo "[$i/$total] [SUCCESS] $base"
+    # 核心修正：仅使用工具支持的参数，--sra-id指定纯SRR编号
+    if parallel-fastq-dump \
+        --sra-id "$srr_base" \
+        --threads "$THREADS" \
+        --outdir "$FASTQ_DIR" \
+        --tmpdir "$TMP_DIR" \
+        --split-files \
+        --gzip; then
+        echo "[$(date)] SUCCESS: $srr_base → compressed FASTQ"
     else
-        echo "[$i/$total] [FAILURE] $base (check log: $log_file)"
+        echo "[$(date)] FAILED: $srr_base"
+        continue  # 单个失败不终止整体脚本
     fi
-    ((i++))
-done
 
-# 清理空临时目录
-find "$TEMP_DIR" -type d -empty -delete
+done < "$SRR_LIST"
 
-echo -e "\n[SUMMARY] All samples processed."
-echo "[OUTPUT] Fastq files: $FASTQ_OUT_DIR"
-echo "[LOGS] Log files: $LOG_DIR"
+# 切回原目录（可选）
+cd - >/dev/null 2>&1
+
+# 清理临时目录
+rm -rf "$TMP_DIR"
+
+echo "=== All done at $(date) ==="
