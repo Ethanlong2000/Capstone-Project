@@ -238,6 +238,7 @@ rule mutect2_scatter:
     output:
         vcf = "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz",
         f1r2 = "vcf/{sample_group}/mutect2/{interval_name}.f1r2.tar.gz",
+        stats = "vcf/{sample_group}/mutect2/{interval_name}.vcf.gz.stats",
     params:
         ref = config["ref_genome"],
         germline = config["germline_resource"],
