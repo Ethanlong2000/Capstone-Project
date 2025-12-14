@@ -18,3 +18,6 @@ if rsync -av --partial --progress $SOURCE_PATTERN "$DEST_DIR/" 2>&1 | tee -a "$L
 else
     echo "[$(date)] 复制过程中出现错误（但 rsync 会尽量继续）" | tee -a "$LOG"
 fi
+
+# cd /work/longyh/BY/raw/WES
+# xargs -a /work/longyh/BY/processed/SRR_list.txt -I {} rsync -avz --partial --progress --bwlimit=20000 {} longyh@192.168.0.108:/work/longyh/BY/raw/
