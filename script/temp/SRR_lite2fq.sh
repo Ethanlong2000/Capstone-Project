@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # 配置参数
-SRR_LIST="/work/longyh/BY/processed/undownload_SRR_list.txt"
-RAW_DIR="/work/longyh/BY/raw"            # .sra 文件所在目录
+# SRR_LIST="/work/longyh/BY/processed/undownload_SRR_list.txt"
+SRR_LIST="/work/longyh/BY/processed/SRR_list.txt"
+RAW_DIR="/work/longyh/BY/raw/WES"            # .sra 文件所在目录
 FASTQ_DIR="/work/longyh/BY/fastq/WES"
 LOG_DIR="/work/longyh/BY/processed/logs/fasterq"
 LOG_FILE="$LOG_DIR/parallel_fastq_$(date +%Y%m%d_%H%M%S).log"
