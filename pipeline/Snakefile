@@ -73,7 +73,8 @@ rule fastp:
         html = "qc/fastp/{sample_group}_{sample}.html"
     threads: config.get("threads", {}).get("fastp", 8)
     resources:
-        io = config.get("resources", {}).get("io", {}).get("fastp", 4)
+        io = config.get("resources", {}).get("io", {}).get("fastp", 4),
+        fastp_slots = config.get("resources", {}).get("fastp_slots", 1)
     log: "logs/{sample_group}/fastp/{sample}.log"
     shell:
         """
