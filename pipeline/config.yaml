@@ -2,19 +2,32 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  # Pt11:  # 替换primary，更易区分多样本
-  #   tumor: tumor
-  #   normal: normal
+  Pt13: 
+    tumor: tumor
+    normal: normal
+  Pt17: 
+    tumor: tumor
+    normal: normal
+  Pt18: 
+    tumor: tumor
+    normal: normal
+  Pt102: 
+    tumor: tumor
+    normal: normal
+  Pt104: 
+    tumor: tumor
+    normal: normal
+
 
 # ===================== 资源配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
 threads:
   fastqc: 8          # FastQC质控线程（轻量可并发更多）
-  align: 48          # 比对/排序/去重线程（IO密集，增加线程提高利用率）
+  align: 24          # 比对/排序/去重线程（IO密集，增加线程提高利用率）
   hla: 8             # HLA分型（Optitype）线程
   mutect2: 16        # Mutect2每个区间线程（CPU密集，适度提升）
   vep: 16            # VEP注释线程（fork并发数）
-  pvacseq_run: 64    # pVACseq新抗原预测线程（可并行较多但受IEDB限制）
+  pvacseq_run: 32    # pVACseq新抗原预测线程（可并行较多但受IEDB限制）
   fastp: 4           # fastp质控线程（单任务适度降压，避免SSH阻塞）
 
 # 可配置的 I/O 资源权重（用于 Snakemake resources.io 调度）
@@ -22,7 +35,7 @@ resources:
   io:
     fastp: 10                      # 提高权重以限制并发数量
     fastqc: 2
-    align_and_dedup: 6             # 较重IO，限制一定并发
+    align_and_dedup: 8             # 较重IO，限制一定并发
     hla_typing: 2
     mutect2_scatter: 3
     mutect2_gather: 2
