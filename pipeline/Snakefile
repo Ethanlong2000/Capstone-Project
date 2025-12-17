@@ -129,7 +129,8 @@ rule align_and_dedup:
         bai = "bam/{sample_group}/{sample}.sorted.dedup.rg.bam.bai"
     threads: config["threads"]["align"]
     resources:
-        io = config.get("resources", {}).get("io", {}).get("align_and_dedup", 4)
+        io = config.get("resources", {}).get("io", {}).get("align_and_dedup", 4),
+        align_slots = config.get("resources", {}).get("align_slots", 1)
     params:
         ref = config["ref_genome"],
         tmp_dir = "tmp/{sample_group}/{sample}",

@@ -2,28 +2,16 @@
 # ===================== 样本信息 =====================
 # 支持批量样本扩展（格式：样本组ID: {tumor: 肿瘤样本名, normal: 正常样本名}）
 samples:
-  Pt13: 
-    tumor: tumor
-    normal: normal
-  Pt17: 
-    tumor: tumor
-    normal: normal
-  Pt18: 
-    tumor: tumor
-    normal: normal
-  Pt102: 
-    tumor: tumor
-    normal: normal
-  Pt104: 
-    tumor: tumor
-    normal: normal
+  # Pt13: 
+  #   tumor: tumor
+  #   normal: normal
 
 
 # ===================== 资源配置 =====================
 # 按工具特性分配线程（根据服务器核心数调整）
 threads:
   fastqc: 8          # FastQC质控线程（轻量可并发更多）
-  align: 24          # 比对/排序/去重线程（IO密集，增加线程提高利用率）
+  align: 12          # 比对/排序/去重线程（适度降线程，降低并发峰值内存/IO占用）
   hla: 8             # HLA分型（Optitype）线程
   mutect2: 16        # Mutect2每个区间线程（CPU密集，适度提升）
   vep: 16            # VEP注释线程（fork并发数）
@@ -49,6 +37,8 @@ resources:
 
   # 单独的 fastp 并发槽，配合 --resources fastp_slots=1 实现串行或小并发
   fastp_slots: 1
+  # 单独的比对并发槽，配合 --resources align_slots=N 控制同时运行的 align_and_dedup 任务数
+  align_slots: 2
 
 mem:
   vep: 32G           # VEP内存分配
