@@ -1,72 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# 配置参数
-SRR_LIST="/work/longyh/BY/processed/SRR_list.txt"
-RAW_DIR="/work/longyh/BY/raw/WES"            # .sra 文件所在目录
-FASTQ_DIR="/work/longyh/BY/fastq/WES"
-LOG_DIR="/work/longyh/BY/processed/logs/fasterq"
-LOG_FILE="$LOG_DIR/parallel_fastq_$(date +%Y%m%d_%H%M%S).log"
+RUN_LIST="/work/longyh/BY/processed/missing_WES_run_naive.txt"
+SRA_BASE="/work/longyh/finish_done"          # 每个 SRR 子目录所在路径
+OUTDIR="/work/longyh/finish_done/fastq"      # fastq 输出目录
+TMPDIR="/work/longyh/finish_done/tmp"        # fasterq-dump 临时目录
+THREADS=8
 
-THREADS=8           # 根据服务器资源调整
-TMP_DIR="/tmp/parallel_fastq_tmp_$(date +%s)_$$"
+mkdir -p "$OUTDIR" "$TMPDIR"
 
-# 检查命令是否存在
-command -v parallel-fastq-dump >/dev/null || { echo "ERROR: parallel-fastq-dump not found" >&2; exit 1; }
+# 读取运行列表（去掉空行和注释行）
+mapfile -t RUNS < <(grep -vE '^\s*#' "$RUN_LIST" | sed '/^\s*$/d')
+TOTAL=${#RUNS[@]}
 
-# 创建必要目录
-mkdir -p "$FASTQ_DIR" "$TMP_DIR" "$LOG_DIR"
+if [[ $TOTAL -eq 0 ]]; then
+  echo "[WARN] 运行列表为空：$RUN_LIST" >&2
+  exit 0
+fi
 
-# 日志同时输出到终端和文件
-exec > >(tee -a "$LOG_FILE") 2>&1
+echo "[INFO] 共需处理 $TOTAL 个 SRA 任务"
 
-# 打印开始信息
-echo "=== Conversion started at $(date) ==="
-echo "Using parallel-fastq-dump v$(parallel-fastq-dump -V 2>&1 | head -n1 | awk '{print $NF}')"
-echo "Log: $LOG_FILE"
-echo "Input dir: $RAW_DIR"
-echo "Output dir: $FASTQ_DIR"
-echo ""
+for idx in "${!RUNS[@]}"; do
+  RUN="${RUNS[$idx]}"
+  current=$(( idx + 1 ))
+  echo "[INFO] ($current/$TOTAL) 正在处理 $RUN"
 
-# 切换到SRA文件目录（核心：让工具能找到.sra文件）
-cd "$RAW_DIR" || { echo "ERROR: Failed to enter $RAW_DIR" >&2; exit 1; }
+  SRA_PATH="$SRA_BASE/$RUN/$RUN.sra"
+  if [[ ! -f "$SRA_PATH" ]]; then
+    echo "[WARN] 未找到 SRA 文件: $SRA_PATH" >&2
+    continue
+  fi
 
-# 遍历SRR列表处理
-while IFS= read -r srr; do
-    # 跳过空行
-    [[ -z "$srr" ]] && continue
+  fasterq-dump \
+    --split-files \
+    --threads "$THREADS" \
+    --temp "$TMPDIR" \
+    -O "$OUTDIR" \
+    "$SRA_PATH"
 
-    # 提取纯SRR编号（移除可能的.sra后缀）
-    srr_base=$(basename "$srr" .sra)
-    
-    # 检查.sra文件是否存在（当前目录已切换到RAW_DIR）
-    if [[ ! -f "${srr_base}.sra" && ! -f "$srr_base" ]]; then
-        echo "ERROR: $RAW_DIR/${srr_base}.sra (or $srr_base) not found. Skipping."
-        continue
-    fi
+  # 压缩输出的 fastq
+  pigz -p "$THREADS" "$OUTDIR/${RUN}"*.fastq
+done
 
-    echo "[$(date)] Processing: $srr_base"
-
-    # 核心修正：仅使用工具支持的参数，--sra-id指定纯SRR编号
-    if parallel-fastq-dump \
-        --sra-id "$srr_base" \
-        --threads "$THREADS" \
-        --outdir "$FASTQ_DIR" \
-        --tmpdir "$TMP_DIR" \
-        --split-files \
-        --gzip; then
-        echo "[$(date)] SUCCESS: $srr_base → compressed FASTQ"
-    else
-        echo "[$(date)] FAILED: $srr_base"
-        continue  # 单个失败不终止整体脚本
-    fi
-
-done < "$SRR_LIST"
-
-# 切回原目录（可选）
-cd - >/dev/null 2>&1
-
-# 清理临时目录
-rm -rf "$TMP_DIR"
-
-echo "=== All done at $(date) ==="
+echo "[DONE] 全部处理完成，输出目录: $OUTDIR"
