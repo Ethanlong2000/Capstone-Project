@@ -2,9 +2,9 @@
 set -euo pipefail
 
 RUN_LIST="/work/longyh/BY/processed/missing_WES_run_naive.txt"
-SRA_BASE="/work/longyh/finish_done"          # 每个 SRR 子目录所在路径
-OUTDIR="/work/longyh/finish_done/fastq"      # fastq 输出目录
-TMPDIR="/work/longyh/finish_done/tmp"        # fasterq-dump 临时目录
+SRA_BASE="/work/longyh/BY/raw"               # 所有 SRR 文件所在路径（扁平目录）
+OUTDIR="/work/longyh/BY/fastq"               # fastq 输出目录
+TMPDIR="/work/longyh/BY/tmp"                 # fasterq-dump 临时目录
 THREADS=8
 
 mkdir -p "$OUTDIR" "$TMPDIR"
@@ -25,9 +25,15 @@ for idx in "${!RUNS[@]}"; do
   current=$(( idx + 1 ))
   echo "[INFO] ($current/$TOTAL) 正在处理 $RUN"
 
-  SRA_PATH="$SRA_BASE/$RUN/$RUN.sra"
+  SRA_PATH="$SRA_BASE/${RUN}.sra"
   if [[ ! -f "$SRA_PATH" ]]; then
     echo "[WARN] 未找到 SRA 文件: $SRA_PATH" >&2
+    continue
+  fi
+
+  # 若 fastq.gz 已存在则跳过，避免重复处理
+  if compgen -G "$OUTDIR/${RUN}"*.fastq.gz > /dev/null; then
+    echo "[INFO] 已存在 fastq.gz，跳过 $RUN"
     continue
   fi
 
