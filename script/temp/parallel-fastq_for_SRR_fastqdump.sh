@@ -7,6 +7,7 @@ set -euo pipefail
 RUN_LIST="/work/longyh/BY/processed/missing_WES_run_naive.txt"
 SRA_BASE="/work/longyh/BY/raw"    # SRA 扁平目录
 OUTDIR="/work/longyh/BY/fastq"    # FASTQ 输出目录
+TMP_DIR="/work/longyh/BY/tmp"     # 临时目录（如需要自定义可修改此处）
 THREADS=8
 
 FASTQ_DUMP=$(command -v fastq-dump || true)
@@ -18,7 +19,7 @@ fi
 PARALLEL_BIN=$(command -v parallel || true)
 PIGZ_BIN=$(command -v pigz || true)
 
-mkdir -p "$OUTDIR"
+mkdir -p "$OUTDIR" "$TMP_DIR"
 
 # 读取运行列表（去掉空行和注释行）
 mapfile -t RUNS < <(grep -vE '^\s*#' "$RUN_LIST" | sed '/^\s*$/d')
@@ -49,7 +50,7 @@ process_one() {
   echo "[INFO] 处理 $RUN"
 
   # --split-3: 将未成对 reads 输出到 *_3.fastq.gz，避免扰乱 _1/_2 配对
-  "$FASTQ_DUMP" \
+  TMPDIR="$TMP_DIR" "$FASTQ_DUMP" \
     --split-3 \
     --gzip \
     --skip-technical \
