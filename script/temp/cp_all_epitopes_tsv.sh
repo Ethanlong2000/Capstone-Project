@@ -34,7 +34,7 @@ mkdir -p "$DST"
 echo "[INFO] Copying local MHC Class I aggregated files..."
 find "$LOCAL_SRC" \
   -type f \
-  -path '*/pvacseq_vep/MHC_Class_I/*_tumor.MHC_I.all_epitopes.aggregated.tsv' \
+  -path '*/pvacseq_vep/MHC_Class_I/*_tumor.MHC_I.all_epitopes.tsv' \
   -exec cp -t "$DST" {} +
 
 # 远程连通性检查 + 预热控制连接
@@ -43,7 +43,7 @@ if "${SSH_CMD[@]}" "${REMOTE_USER}@${REMOTE_HOST}" 'true' 2>/dev/null; then
   echo "[INFO] Remote reachable. Collecting file list from $REMOTE_SRC ..."
 
   # 远程查找（仅 MHC Class I），以 null 分隔，避免特殊字符问题
-  REMOTE_LIST_CMD="find '$REMOTE_SRC' -type f -path '*/pvacseq_vep/MHC_Class_I/*_tumor.MHC_I.all_epitopes.aggregated.tsv' -print0"
+  REMOTE_LIST_CMD="find '$REMOTE_SRC' -type f -path '*/pvacseq_vep/MHC_Class_I/*_tumor.MHC_I.all_epitopes.tsv' -print0"
   # 将远端文件列表落到本地临时文件（null 分隔）
   TMP_LIST="$(mktemp)"
   trap 'rm -f "$TMP_LIST"' EXIT
