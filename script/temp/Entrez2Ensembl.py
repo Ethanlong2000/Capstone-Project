@@ -4,6 +4,31 @@ import pandas as pd
 tpm = pd.read_csv('/work/longyh/BY/processed/GSE91061_BMS038109Sample.hg19KnownGene.tpm.csv', index_col=0)
 tpm.index = tpm.index.astype(str)
 
+# 0) 可选：使用 gene_history 将退役 / 合并的 Entrez ID 映射到现行 GeneID（提高命中率）
+hist_path = '/work/longyh/BY/processed/gene_history.gz'
+try:
+    g_hist = pd.read_csv(
+        hist_path,
+        sep='\t',
+        compression='gzip',
+        dtype=str,
+        usecols=['#tax_id', 'GeneID', 'Discontinued_GeneID'],
+    )
+    g_hist = g_hist[(g_hist['#tax_id'] == '9606') & g_hist['GeneID'].notna() & g_hist['Discontinued_GeneID'].notna()]
+    # 去掉无效占位符
+    g_hist = g_hist[(g_hist['GeneID'] != '-') & (g_hist['Discontinued_GeneID'] != '-')]
+    hist_map = dict(zip(g_hist['Discontinued_GeneID'], g_hist['GeneID']))
+    # 为每个索引做映射：若是退役 ID 则替换为现行 GeneID
+    mapped_ids = tpm.index.map(lambda x: hist_map.get(x, x)).astype(str)
+    tpm['entrez_id_mapped'] = mapped_ids
+    updated_ct = int((mapped_ids != tpm.index).sum())
+except FileNotFoundError:
+    hist_map = {}
+    tpm['entrez_id_mapped'] = tpm.index
+    updated_ct = 0
+
+original_ids = tpm.index.copy()  # 保留原始 Entrez 以便输出
+
 # 1) NCBI gene2ensembl（只保留人类），显式检查列，若缺失则报错提示
 g2e_path = '/work/longyh/BY/processed/gene2ensembl.gz'
 g2e = pd.read_csv(
@@ -43,7 +68,7 @@ hgnc = hgnc.dropna(subset=['entrez_id', 'ensembl_gene_id']).drop_duplicates(subs
 
 # 3) 先用 gene2ensembl 合并
 df = tpm.copy()
-df = df.merge(g2e, left_index=True, right_on='entrez_id', how='left')
+df = df.merge(g2e, left_on='entrez_id_mapped', right_on='entrez_id', how='left')
 
 # 确保合并后有 ensembl_gene_id 列，即便为空也创建
 if 'ensembl_gene_id' not in df.columns:
@@ -52,7 +77,8 @@ if 'ensembl_gene_id' not in df.columns:
 # 4) 对 gene2ensembl 未命中者，用 HGNC 兜底
 mask_missing = df['ensembl_gene_id'].isna()
 if mask_missing.any():
-    fallback = df.loc[mask_missing, ['entrez_id']].merge(hgnc, on='entrez_id', how='left')
+    fallback = df.loc[mask_missing, ['entrez_id_mapped']].rename(columns={'entrez_id_mapped': 'entrez_id'})
+    fallback = fallback.merge(hgnc, on='entrez_id', how='left')
     df.loc[mask_missing, 'ensembl_gene_id'] = fallback['ensembl_gene_id'].values
 
 # 5) 统计与列重排
@@ -61,9 +87,13 @@ hits = int(df['ensembl_gene_id'].notna().sum())
 miss = total - hits
 print(f'Total genes: {total}')
 print(f'Ensembl mapped (offline): {hits} ({hits/total:.2%}), missing: {miss}')
+print(f'Entrez IDs updated via gene_history: {updated_ct}')
 
 df['ensembl_gene_id'] = df['ensembl_gene_id'].fillna('N/A')
-cols = ['ensembl_gene_id'] + [c for c in df.columns if c not in ('ensembl_gene_id', 'entrez_id')]
+cols = ['ensembl_gene_id', 'entrez_id_mapped'] + [c for c in df.columns if c not in ('ensembl_gene_id', 'entrez_id_mapped', 'entrez_id')]
 df = df[cols]
+
+# 恢复原始索引（原始 Entrez）便于追溯
+df.index = original_ids
 
 df.to_csv('/work/longyh/BY/processed/GSE91061_BMS038109Sample.hg19KnownGene.tpm_with_ensembl_offline.csv')
