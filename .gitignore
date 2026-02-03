@@ -60,3 +60,10 @@ __pycache__/
 
 # Jupyter Notebook 输出
 *.ipynb_checkpoints/
+
+#图片
+*.jpg
+*.png
+*.svg
+*.pdf
+*.eps
